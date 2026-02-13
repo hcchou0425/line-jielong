@@ -362,6 +362,16 @@ def health():
 def webhook():
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
+
+    # 記錄收到的事件類型，幫助診斷
+    try:
+        import json
+        events = json.loads(body).get("events", [])
+        for ev in events:
+            logger.info(f"[webhook] type={ev.get('type')} source={ev.get('source',{}).get('type')}")
+    except Exception:
+        logger.info(f"[webhook] raw body: {body[:200]}")
+
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
