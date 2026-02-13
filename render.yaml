@@ -13,5 +13,3 @@ services:
         sync: false
       - key: DB_PATH
         value: jielong.db
-      - key: PORT
-        value: 10000
