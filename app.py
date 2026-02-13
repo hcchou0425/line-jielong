@@ -345,6 +345,12 @@ def cmd_leave(group_id, user_id):
 # LINE Webhook 路由
 # ──────────────────────────────────────────
 
+@app.route("/", methods=["GET"])
+def health():
+    """Health check — 確認伺服器正常運作"""
+    return "LINE 接龍助理運作中 ✅", 200
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     signature = request.headers.get("X-Line-Signature", "")
