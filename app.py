@@ -348,7 +348,14 @@ def cmd_leave(group_id, user_id):
 @app.route("/", methods=["GET"])
 def health():
     """Health check — 確認伺服器正常運作"""
-    return "LINE 接龍助理運作中 ✅", 200
+    status = {
+        "status": "ok",
+        "scheduler": _scheduler_started,
+        "db": DB_PATH,
+        "token_set": bool(LINE_CHANNEL_ACCESS_TOKEN),
+        "secret_set": bool(LINE_CHANNEL_SECRET),
+    }
+    return str(status), 200
 
 
 @app.route("/webhook", methods=["POST"])
@@ -449,27 +456,34 @@ def start_scheduler():
 # ──────────────────────────────────────────
 # 啟動初始化
 # 放在模組層級，gunicorn 和 python app.py 都會執行
+# 用 try-except 包住，確保任何錯誤都不會阻止 app 綁定 port
 # ──────────────────────────────────────────
 
-# 初始化資料庫（idempotent，重複呼叫安全）
-init_db()
-
-# 啟動每日推播排程器
-# 用 threading.Lock 防止多次 import 時重複啟動
 import threading
 _startup_lock = threading.Lock()
 _scheduler_started = False
 
 
-def _ensure_scheduler():
+def _startup():
     global _scheduler_started
     with _startup_lock:
+        # 初始化資料庫
+        try:
+            init_db()
+            logger.info("[startup] 資料庫初始化完成")
+        except Exception as e:
+            logger.error(f"[startup] 資料庫初始化失敗: {e}")
+
+        # 啟動排程器（只啟動一次）
         if not _scheduler_started:
-            start_scheduler()
-            _scheduler_started = True
+            try:
+                start_scheduler()
+                _scheduler_started = True
+            except Exception as e:
+                logger.error(f"[startup] 排程器啟動失敗: {e}")
 
 
-_ensure_scheduler()
+_startup()
 
 
 # ──────────────────────────────────────────
