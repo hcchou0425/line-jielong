@@ -1,0 +1,6 @@
+flask>=2.3.0
+line-bot-sdk>=2.4.2
+gunicorn>=21.0.0
+python-dotenv>=1.0.0
+APScheduler>=3.10.0
+pytz>=2024.1

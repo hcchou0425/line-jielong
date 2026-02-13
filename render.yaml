@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: rbot-line-bot
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 0 app:app
+    envVars:
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: DB_PATH
+        value: jielong.db
+      - key: PORT
+        value: 10000
