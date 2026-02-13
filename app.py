@@ -447,11 +447,35 @@ def start_scheduler():
 
 
 # ──────────────────────────────────────────
-# 主程式
+# 啟動初始化
+# 放在模組層級，gunicorn 和 python app.py 都會執行
+# ──────────────────────────────────────────
+
+# 初始化資料庫（idempotent，重複呼叫安全）
+init_db()
+
+# 啟動每日推播排程器
+# 用 threading.Lock 防止多次 import 時重複啟動
+import threading
+_startup_lock = threading.Lock()
+_scheduler_started = False
+
+
+def _ensure_scheduler():
+    global _scheduler_started
+    with _startup_lock:
+        if not _scheduler_started:
+            start_scheduler()
+            _scheduler_started = True
+
+
+_ensure_scheduler()
+
+
+# ──────────────────────────────────────────
+# 主程式（直接執行時）
 # ──────────────────────────────────────────
 
 if __name__ == "__main__":
-    init_db()
-    start_scheduler()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
