@@ -365,7 +365,10 @@ def webhook():
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
+        logger.error("[webhook] Invalid signature — 請確認 LINE_CHANNEL_SECRET 設定正確")
         abort(400)
+    except Exception as e:
+        logger.error(f"[webhook] 處理失敗: {e}")
     return "OK"
 
 
@@ -374,6 +377,8 @@ def handle_message(event):
     text = event.message.text.strip()
     gid  = source_id(event)
     uid  = event.source.user_id
+
+    logger.info(f"[msg] gid={gid} uid={uid} text={repr(text)}")
 
     # 懶惰取得使用者名稱（只在需要時才查詢）
     def lazy_name():
@@ -405,11 +410,16 @@ def handle_message(event):
     elif text in ("說明", "/說明", "help", "/help", "幫助"):
         reply = HELP_TEXT
 
+    logger.info(f"[msg] reply={'（無）' if reply is None else repr(reply[:30])}")
+
     if reply:
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=reply),
-        )
+        try:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=reply),
+            )
+        except Exception as e:
+            logger.error(f"[reply] 回覆失敗: {e}")
 
 
 @handler.add(JoinEvent)
