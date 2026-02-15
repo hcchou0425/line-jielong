@@ -203,6 +203,19 @@ def source_id(event):
         return src.room_id
     return src.user_id
 
+def normalize(text):
+    """全形英數符號 → 半形（處理中文輸入法輸入的 ＋、１２３ 等）"""
+    result = []
+    for ch in text:
+        code = ord(ch)
+        if 0xFF01 <= code <= 0xFF5E:   # 全形 ！～ → 半形 !~
+            result.append(chr(code - 0xFEE0))
+        elif ch == '\u3000':            # 全形空格 → 半形空格
+            result.append(' ')
+        else:
+            result.append(ch)
+    return ''.join(result)
+
 
 # ══════════════════════════════════════════
 # 排班表解析
@@ -722,7 +735,7 @@ def webhook():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    text = event.message.text.strip()
+    text = normalize(event.message.text.strip())
     gid  = source_id(event)
     uid  = event.source.user_id
 
