@@ -49,9 +49,14 @@ HELP_TEXT = """📖 接龍助理使用說明
 +[編號] 你的名字  — 報名特定工作
 +3 小明           — 報名第3項
 +3               — 報名第3項（用LINE暱稱）
+幫報 [編號] [姓名] — 代替他人報名
 退出 [編號]       — 取消特定項目報名
 列表              — 查看目前報名狀況
 結束接龍          — 封存最終名單
+
+【開團者專用】
+移除 [編號] [姓名]       — 移除指定人員
+更改 [編號] [舊名] [新名] — 修改報名者姓名
 
 ─────────────────
 【簡易接龍模式】
@@ -87,15 +92,16 @@ def init_db():
     """)
     c.execute("""
         CREATE TABLE IF NOT EXISTS entries (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            list_id    INTEGER NOT NULL,
-            user_id    TEXT    NOT NULL,
-            user_name  TEXT,
-            item       TEXT,
-            quantity   TEXT,
-            seq        INTEGER,
-            slot_num   INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            list_id         INTEGER NOT NULL,
+            user_id         TEXT    NOT NULL,
+            user_name       TEXT,
+            item            TEXT,
+            quantity        TEXT,
+            seq             INTEGER,
+            slot_num        INTEGER,
+            registered_by   TEXT,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (list_id) REFERENCES lists (id)
         )
     """)
@@ -116,8 +122,9 @@ def init_db():
     """)
     # 相容舊資料庫：補欄位（已存在時靜默忽略）
     for sql in [
-        "ALTER TABLE lists   ADD COLUMN list_type TEXT DEFAULT 'simple'",
-        "ALTER TABLE entries ADD COLUMN slot_num  INTEGER",
+        "ALTER TABLE lists   ADD COLUMN list_type     TEXT DEFAULT 'simple'",
+        "ALTER TABLE entries ADD COLUMN slot_num      INTEGER",
+        "ALTER TABLE entries ADD COLUMN registered_by TEXT",
     ]:
         try:
             c.execute(sql)
@@ -602,6 +609,128 @@ def _join_simple(group_id, user_id, user_name, text, active):
     return reply + "\n（名單每天 07:00 公布，或輸入「列表」隨時查看）"
 
 
+def cmd_proxy_join(group_id, user_id, user_name, text):
+    """幫報 [編號] [姓名] — 代替他人報名（排班模式）"""
+    active = get_active_list(group_id)
+    if not active:
+        return "目前沒有進行中的接龍。"
+    if _list_type(active) != "schedule":
+        return "幫報功能只適用於排班模式。"
+
+    m = re.match(r"幫報\s+(\d+)\s+(.+)", text)
+    if not m:
+        return "格式：幫報 [編號] [姓名]\n例：幫報 3 小明"
+
+    list_id  = active[0]
+    slot_num = int(m.group(1))
+    name     = m.group(2).strip()
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    c.execute("SELECT * FROM slots WHERE list_id=? AND slot_num=?", (list_id, slot_num))
+    slot = c.fetchone()
+    if not slot:
+        conn.close()
+        return f"找不到第 {slot_num} 號工作項目。\n輸入「列表」查看可報名的項目。"
+
+    required = slot[8]
+
+    # 同一姓名已在此 slot → 提示重複
+    c.execute(
+        "SELECT id FROM entries WHERE list_id=? AND slot_num=? AND user_name=?",
+        (list_id, slot_num, name),
+    )
+    if c.fetchone():
+        conn.close()
+        return f"❌ {name} 已在第 {slot_num} 號工作中了。"
+
+    # 檢查額滿
+    if required > 1:
+        c.execute("SELECT COUNT(*) FROM entries WHERE list_id=? AND slot_num=?", (list_id, slot_num))
+        if c.fetchone()[0] >= required:
+            conn.close()
+            return f"❌ 第 {slot_num} 號已額滿（{required} 人）！"
+
+    # 用特殊 user_id 避免跟操作者自己的報名衝突
+    proxy_uid = f"__proxy__{slot_num}__{name}"
+    c.execute(
+        "INSERT INTO entries (list_id, user_id, user_name, slot_num, seq, registered_by)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (list_id, proxy_uid, name, slot_num, slot_num, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+    operator = user_name or "代報者"
+    return f"✅ 已代替 {name} 報名！\n{slot_num}. {_slot_label(slot)} → {name}\n（由 {operator} 代報）"
+
+
+def cmd_admin_remove(group_id, user_id, text):
+    """移除 [編號] [姓名] — 開團者移除指定人員"""
+    active = get_active_list(group_id)
+    if not active:
+        return "目前沒有進行中的接龍。"
+    if active[3] != user_id:
+        return "❌ 只有開團者可以使用此指令。"
+
+    m = re.match(r"移除\s+(\d+)\s+(.+)", text)
+    if not m:
+        return "格式：移除 [編號] [姓名]\n例：移除 3 小明"
+
+    list_id  = active[0]
+    slot_num = int(m.group(1))
+    name     = m.group(2).strip()
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "DELETE FROM entries WHERE list_id=? AND slot_num=? AND user_name=?",
+        (list_id, slot_num, name),
+    )
+    affected = c.rowcount
+    conn.commit()
+    conn.close()
+
+    if affected:
+        return f"✅ 已移除：第 {slot_num} 號 {name}"
+    else:
+        return f"找不到第 {slot_num} 號中的「{name}」。"
+
+
+def cmd_admin_rename(group_id, user_id, text):
+    """更改 [編號] [舊名] [新名] — 開團者修改報名者姓名"""
+    active = get_active_list(group_id)
+    if not active:
+        return "目前沒有進行中的接龍。"
+    if active[3] != user_id:
+        return "❌ 只有開團者可以使用此指令。"
+
+    m = re.match(r"更改\s+(\d+)\s+(\S+)\s+(\S+)", text)
+    if not m:
+        return "格式：更改 [編號] [舊名] [新名]\n例：更改 3 小明 小美"
+
+    list_id  = active[0]
+    slot_num = int(m.group(1))
+    old_name = m.group(2).strip()
+    new_name = m.group(3).strip()
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "UPDATE entries SET user_name=? WHERE list_id=? AND slot_num=? AND user_name=?",
+        (new_name, list_id, slot_num, old_name),
+    )
+    affected = c.rowcount
+    conn.commit()
+    conn.close()
+
+    if affected:
+        return f"✅ 已修改：第 {slot_num} 號 {old_name} → {new_name}"
+    else:
+        return f"找不到第 {slot_num} 號中的「{old_name}」。"
+
+
 def cmd_list(group_id):
     active = get_active_list(group_id)
     if not active:
@@ -769,6 +898,18 @@ def handle_message(event):
     # ── 退出（支援「退出 3」取消特定項目）
     elif re.match(r"(退出|取消)(\s+\d+)?$", text):
         reply = cmd_leave(gid, uid, text)
+
+    # ── 幫報（代替他人報名）
+    elif re.match(r"幫報\s+\d+\s+\S", text):
+        reply = cmd_proxy_join(gid, uid, lazy_name(), text)
+
+    # ── 開團者：移除指定人員
+    elif re.match(r"移除\s+\d+\s+\S", text):
+        reply = cmd_admin_remove(gid, uid, text)
+
+    # ── 開團者：修改姓名
+    elif re.match(r"更改\s+\d+\s+\S+\s+\S", text):
+        reply = cmd_admin_rename(gid, uid, text)
 
     # ── 說明
     elif text in ("說明", "/說明", "help", "/help", "幫助"):
