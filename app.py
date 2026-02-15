@@ -494,8 +494,13 @@ def _startup():
         except Exception as e:
             logger.error(f"[startup] 資料庫初始化失敗: {e}")
 
-        # 啟動排程器（只啟動一次）
-        if not _scheduler_started:
+        # 只在 gunicorn worker process 啟動排程器（非 master process）
+        # 用環境變數 SERVER_SOFTWARE 判斷是否在 gunicorn worker 裡
+        # 若不在 gunicorn（直接執行 python app.py），也啟動
+        in_gunicorn = "gunicorn" in os.environ.get("SERVER_SOFTWARE", "")
+        is_worker = os.environ.get("GUNICORN_WORKER", "") == "1"
+
+        if not _scheduler_started and (not in_gunicorn or is_worker):
             try:
                 start_scheduler()
                 _scheduler_started = True
