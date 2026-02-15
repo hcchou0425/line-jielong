@@ -11,7 +11,7 @@ import json
 import sqlite3
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -80,14 +80,16 @@ def init_db():
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS lists (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            group_id     TEXT    NOT NULL,
-            title        TEXT    NOT NULL,
-            creator_id   TEXT    NOT NULL,
-            creator_name TEXT,
-            status       TEXT    DEFAULT 'open',
-            created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            list_type    TEXT    DEFAULT 'simple'
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id             TEXT    NOT NULL,
+            title                TEXT    NOT NULL,
+            creator_id           TEXT    NOT NULL,
+            creator_name         TEXT,
+            status               TEXT    DEFAULT 'open',
+            created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            list_type            TEXT    DEFAULT 'simple',
+            last_broadcast_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_broadcast_count INTEGER DEFAULT 0
         )
     """)
     c.execute("""
@@ -122,9 +124,11 @@ def init_db():
     """)
     # 相容舊資料庫：補欄位（已存在時靜默忽略）
     for sql in [
-        "ALTER TABLE lists   ADD COLUMN list_type     TEXT DEFAULT 'simple'",
-        "ALTER TABLE entries ADD COLUMN slot_num      INTEGER",
-        "ALTER TABLE entries ADD COLUMN registered_by TEXT",
+        "ALTER TABLE lists   ADD COLUMN list_type            TEXT      DEFAULT 'simple'",
+        "ALTER TABLE lists   ADD COLUMN last_broadcast_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE lists   ADD COLUMN last_broadcast_count INTEGER   DEFAULT 0",
+        "ALTER TABLE entries ADD COLUMN slot_num             INTEGER",
+        "ALTER TABLE entries ADD COLUMN registered_by        TEXT",
     ]:
         try:
             c.execute(sql)
@@ -191,6 +195,31 @@ def get_all_active_lists():
     rows = c.fetchall()
     conn.close()
     return rows
+
+def get_entry_count(list_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM entries WHERE list_id=?", (list_id,))
+    count = c.fetchone()[0]
+    conn.close()
+    return count
+
+def update_broadcast_state(list_id):
+    """推播完成後，更新 last_broadcast_at 及 last_broadcast_count"""
+    count = get_entry_count(list_id)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "UPDATE lists SET last_broadcast_at=CURRENT_TIMESTAMP, last_broadcast_count=? WHERE id=?",
+        (count, list_id),
+    )
+    conn.commit()
+    conn.close()
+
+def is_broadcast_allowed():
+    """台灣時間 07:00–22:00 之間才允許推播"""
+    hour = datetime.now(TZ_TAIPEI).hour
+    return 7 <= hour < 22
 
 def get_user_name(event, group_id, user_id):
     try:
@@ -397,36 +426,89 @@ def format_list(list_row, entries, *, show_time=False):
 
 
 # ══════════════════════════════════════════
-# 每日推播
+# 推播核心
 # ══════════════════════════════════════════
 
+def _push_list(lst, prefix=""):
+    """對單一接龍推播名單，成功後更新推播狀態"""
+    group_id = lst[1]
+    ltype    = _list_type(lst)
+
+    if ltype == "schedule":
+        slots   = get_slots(lst[0])
+        signups = get_slot_signups(lst[0])
+        body    = format_schedule_list(lst, slots, signups, show_time=True)
+    else:
+        entries = get_entries(lst[0])
+        body    = format_list(lst, entries, show_time=True)
+
+    message = f"{prefix}\n\n{body}".strip() if prefix else body
+    try:
+        line_bot_api.push_message(group_id, TextSendMessage(text=message))
+        logger.info(f"[broadcast] 推播至 {group_id}：{lst[2]}")
+        update_broadcast_state(lst[0])
+    except Exception as e:
+        logger.error(f"[broadcast] 推播失敗 {group_id}：{e}")
+
+
 def daily_broadcast():
+    """每天 07:00 早安推播"""
     active_lists = get_all_active_lists()
     if not active_lists:
         logger.info("[排程] 目前沒有進行中的接龍，跳過推播")
         return
 
     now_str = datetime.now(TZ_TAIPEI).strftime("%Y/%m/%d")
-    logger.info(f"[排程] 開始推播 {len(active_lists)} 個接龍")
+    logger.info(f"[排程] 早安推播 {len(active_lists)} 個接龍")
+    prefix = f"📣 早安！以下是今日工作認養名單（{now_str}）"
+    for lst in active_lists:
+        _push_list(lst, prefix)
+
+
+def check_timed_broadcast():
+    """每小時執行：距上次推播已超過 6 小時且在允許時段內，則推播"""
+    if not is_broadcast_allowed():
+        return
+
+    active_lists = get_all_active_lists()
+    now = datetime.now(TZ_TAIPEI)
 
     for lst in active_lists:
-        group_id  = lst[1]
-        ltype     = _list_type(lst)
-
-        if ltype == "schedule":
-            slots   = get_slots(lst[0])
-            signups = get_slot_signups(lst[0])
-            body    = format_schedule_list(lst, slots, signups, show_time=True)
+        last_at_str = lst[8]  # last_broadcast_at
+        if last_at_str:
+            try:
+                last_at = datetime.strptime(last_at_str, "%Y-%m-%d %H:%M:%S")
+                last_at = pytz.utc.localize(last_at).astimezone(TZ_TAIPEI)
+            except Exception:
+                last_at = now  # 解析失敗則跳過
         else:
-            entries = get_entries(lst[0])
-            body    = format_list(lst, entries, show_time=True)
+            last_at = now - timedelta(hours=7)  # None → 視為很久以前
 
-        message = f"📣 早安！以下是今日工作認養名單（{now_str}）\n\n{body}"
-        try:
-            line_bot_api.push_message(group_id, TextSendMessage(text=message))
-            logger.info(f"[排程] 已推播至 {group_id}：{lst[2]}")
-        except Exception as e:
-            logger.error(f"[排程] 推播失敗 {group_id}：{e}")
+        elapsed_hours = (now - last_at).total_seconds() / 3600
+        if elapsed_hours >= 6:
+            logger.info(f"[排程] 6 小時定時推播：{lst[2]}")
+            _push_list(lst, "📋 定時更新")
+
+
+def check_activity_broadcast(list_id):
+    """報名後檢查：新增報名數 ≥ 6 且在允許時段，則立即推播"""
+    if not is_broadcast_allowed():
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM lists WHERE id=?", (list_id,))
+    lst = c.fetchone()
+    conn.close()
+    if not lst or lst[5] != "open":
+        return
+
+    last_count    = lst[9] if lst[9] is not None else 0  # last_broadcast_count
+    current_count = get_entry_count(list_id)
+
+    if (current_count - last_count) >= 6:
+        logger.info(f"[排程] 活動觸發推播（新增 {current_count - last_count} 筆）：{lst[2]}")
+        _push_list(lst, "📢 名單更新")
 
 
 # ══════════════════════════════════════════
@@ -448,7 +530,8 @@ def cmd_post_schedule(group_id, user_id, user_name, text):
     c = conn.cursor()
     c.execute('UPDATE lists SET status="closed" WHERE group_id=? AND status="open"', (group_id,))
     c.execute(
-        "INSERT INTO lists (group_id, title, creator_id, creator_name, list_type) VALUES (?, ?, ?, ?, 'schedule')",
+        "INSERT INTO lists (group_id, title, creator_id, creator_name, list_type, last_broadcast_at, last_broadcast_count)"
+        " VALUES (?, ?, ?, ?, 'schedule', CURRENT_TIMESTAMP, 0)",
         (group_id, title, user_id, user_name),
     )
     list_id = c.lastrowid
@@ -485,7 +568,8 @@ def cmd_open(group_id, user_id, user_name, text):
     c = conn.cursor()
     c.execute('UPDATE lists SET status="closed" WHERE group_id=? AND status="open"', (group_id,))
     c.execute(
-        "INSERT INTO lists (group_id, title, creator_id, creator_name) VALUES (?, ?, ?, ?)",
+        "INSERT INTO lists (group_id, title, creator_id, creator_name, last_broadcast_at, last_broadcast_count)"
+        " VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 0)",
         (group_id, title, user_id, user_name),
     )
     conn.commit()
@@ -566,6 +650,7 @@ def _join_slot(group_id, user_id, user_name, text, active):
     )
     conn.commit()
     conn.close()
+    check_activity_broadcast(list_id)
     return f"✅ 報名成功！\n{slot_num}. {_slot_label(slot)} → {name}\n（輸入「列表」查看完整名單）"
 
 
@@ -606,6 +691,7 @@ def _join_simple(group_id, user_id, user_name, text, active):
 
     conn.commit()
     conn.close()
+    check_activity_broadcast(list_id)
     return reply + "\n（名單每天 07:00 公布，或輸入「列表」隨時查看）"
 
 
@@ -661,7 +747,7 @@ def cmd_proxy_join(group_id, user_id, user_name, text):
     )
     conn.commit()
     conn.close()
-
+    check_activity_broadcast(list_id)
     operator = user_name or "代報者"
     return f"✅ 已代替 {name} 報名！\n{slot_num}. {_slot_label(slot)} → {name}\n（由 {operator} 代報）"
 
@@ -947,12 +1033,18 @@ def handle_join(event):
 
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI)
+    # 每天 07:00 早安推播
     scheduler.add_job(
         daily_broadcast, trigger="cron", hour=7, minute=0,
         id="daily_broadcast", replace_existing=True,
     )
+    # 每小時檢查：距上次推播 ≥ 6 小時 → 推播（22:00–07:00 不執行）
+    scheduler.add_job(
+        check_timed_broadcast, trigger="cron", minute=5,
+        id="timed_broadcast", replace_existing=True,
+    )
     scheduler.start()
-    logger.info("[排程] 已啟動，每天 07:00（台灣時間）自動推播")
+    logger.info("[排程] 已啟動：07:00 早安推播 + 每小時定時檢查（22:00–07:00 靜音）")
     return scheduler
 
 
