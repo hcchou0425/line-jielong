@@ -594,12 +594,17 @@ def cmd_list(group_id):
     if not active:
         return "目前沒有進行中的接龍。"
 
-    if _list_type(active) == "schedule":
+    ltype = _list_type(active)
+    logger.info(f"[cmd_list] list_id={active[0]} list_type={ltype}")
+
+    if ltype == "schedule":
         slots   = get_slots(active[0])
         signups = get_slot_signups(active[0])
+        logger.info(f"[cmd_list] slots={len(slots)} signups={signups}")
         return format_schedule_list(active, slots, signups)
     else:
         entries = get_entries(active[0])
+        logger.info(f"[cmd_list] entries={len(entries)}")
         return format_list(active, entries)
 
 
