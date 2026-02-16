@@ -29,7 +29,7 @@ app = Flask(__name__)
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
-DB_PATH = os.environ.get("DB_PATH", "jielong.db")
+DB_PATH = os.environ.get("DB_PATH", "/data/jielong.db")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -67,7 +67,15 @@ HELP_TEXT = """📖 接龍助理使用說明
 結束接龍     — 封存最終名單
 
 ─────────────────
-📌 每天早上 07:00 自動公布最新名單"""
+【推播設定（無需重新部署）】
+推播設定              — 查看目前設定
+設定推播 08:00        — 更改早安推播時間
+設定靜音 22 7         — 設定靜音時段（22:00–07:00）
+設定推播門檻 10       — 改活動觸發門檻
+設定推播間隔 4        — 改定時推播間隔（小時）
+
+─────────────────
+📌 早安推播 + 6次報名觸發 + 每6小時定時（22:00–07:00靜音）"""
 
 
 # ══════════════════════════════════════════
@@ -122,6 +130,25 @@ def init_db():
             FOREIGN KEY (list_id) REFERENCES lists (id)
         )
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+    # 預設推播設定（第一次建立時寫入，之後不覆蓋）
+    defaults = [
+        ("broadcast_hour",      "7"),   # 早安推播小時（0–23）
+        ("broadcast_minute",    "0"),   # 早安推播分鐘
+        ("allow_start",         "7"),   # 允許推播開始（含）
+        ("allow_end",           "22"),  # 允許推播結束（不含）→ 22:00 後靜音
+        ("activity_threshold",  "6"),   # 新增幾筆觸發即時推播
+        ("interval_hours",      "6"),   # 定時推播間隔小時
+    ]
+    c.executemany(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", defaults
+    )
+
     # 相容舊資料庫：補欄位（已存在時靜默忽略）
     for sql in [
         "ALTER TABLE lists   ADD COLUMN list_type            TEXT      DEFAULT 'simple'",
@@ -196,6 +223,21 @@ def get_all_active_lists():
     conn.close()
     return rows
 
+def get_setting(key, default=""):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT value FROM settings WHERE key=?", (key,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else default
+
+def set_setting(key, value):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+    conn.commit()
+    conn.close()
+
 def get_entry_count(list_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -217,9 +259,11 @@ def update_broadcast_state(list_id):
     conn.close()
 
 def is_broadcast_allowed():
-    """台灣時間 07:00–22:00 之間才允許推播"""
-    hour = datetime.now(TZ_TAIPEI).hour
-    return 7 <= hour < 22
+    """台灣時間在允許時段內才推播（預設 07:00–22:00）"""
+    hour        = datetime.now(TZ_TAIPEI).hour
+    allow_start = int(get_setting("allow_start", "7"))
+    allow_end   = int(get_setting("allow_end",   "22"))
+    return allow_start <= hour < allow_end
 
 def get_user_name(event, group_id, user_id):
     try:
@@ -484,8 +528,9 @@ def check_timed_broadcast():
         else:
             last_at = now - timedelta(hours=7)  # None → 視為很久以前
 
+        interval = float(get_setting("interval_hours", "6"))
         elapsed_hours = (now - last_at).total_seconds() / 3600
-        if elapsed_hours >= 6:
+        if elapsed_hours >= interval:
             logger.info(f"[排程] 6 小時定時推播：{lst[2]}")
             _push_list(lst, "📋 定時更新")
 
@@ -505,8 +550,9 @@ def check_activity_broadcast(list_id):
 
     last_count    = lst[9] if lst[9] is not None else 0  # last_broadcast_count
     current_count = get_entry_count(list_id)
+    threshold     = int(get_setting("activity_threshold", "6"))
 
-    if (current_count - last_count) >= 6:
+    if (current_count - last_count) >= threshold:
         logger.info(f"[排程] 活動觸發推播（新增 {current_count - last_count} 筆）：{lst[2]}")
         _push_list(lst, "📢 名單更新")
 
@@ -750,6 +796,96 @@ def cmd_proxy_join(group_id, user_id, user_name, text):
     check_activity_broadcast(list_id)
     operator = user_name or "代報者"
     return f"✅ 已代替 {name} 報名！\n{slot_num}. {_slot_label(slot)} → {name}\n（由 {operator} 代報）"
+
+
+def cmd_show_settings():
+    """推播設定 — 顯示目前所有推播設定"""
+    h  = get_setting("broadcast_hour",   "7")
+    m  = get_setting("broadcast_minute", "0")
+    a1 = get_setting("allow_start",      "7")
+    a2 = get_setting("allow_end",        "22")
+    th = get_setting("activity_threshold","6")
+    iv = get_setting("interval_hours",   "6")
+    return (
+        f"📋 目前推播設定\n"
+        f"─────────────────\n"
+        f"⏰ 早安推播：每天 {int(h):02d}:{int(m):02d}\n"
+        f"🔇 靜音時段：{int(a2):02d}:00 – {int(a1):02d}:00\n"
+        f"📊 活動門檻：新增 {th} 筆報名即推播\n"
+        f"🕐 定時間隔：每 {iv} 小時推播一次\n"
+        f"─────────────────\n"
+        f"修改指令：\n"
+        f"設定推播 08:00      — 改早安時間\n"
+        f"設定靜音 23 7       — 改靜音時段\n"
+        f"設定推播門檻 10     — 改活動觸發門檻\n"
+        f"設定推播間隔 4      — 改定時間隔（小時）"
+    )
+
+
+def cmd_set_broadcast_time(text):
+    """設定推播 HH:MM — 修改早安推播時間並即時生效"""
+    m = re.match(r"設定推播\s+(\d{1,2})(?:[：:](\d{2}))?$", text)
+    if not m:
+        return "格式：設定推播 HH:MM\n例：設定推播 08:00\n例：設定推播 7"
+    hour   = int(m.group(1))
+    minute = int(m.group(2)) if m.group(2) else 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return "時間格式錯誤，小時 0–23，分鐘 0–59"
+
+    set_setting("broadcast_hour",   hour)
+    set_setting("broadcast_minute", minute)
+
+    # 即時更新 scheduler
+    if _scheduler:
+        try:
+            _scheduler.reschedule_job(
+                "daily_broadcast",
+                trigger="cron", hour=hour, minute=minute,
+            )
+            logger.info(f"[設定] 早安推播已更新為 {hour:02d}:{minute:02d}")
+        except Exception as e:
+            logger.error(f"[設定] reschedule 失敗: {e}")
+
+    return f"✅ 早安推播已更新為 每天 {hour:02d}:{minute:02d}（台灣時間）\n無需重新部署，立即生效。"
+
+
+def cmd_set_quiet(text):
+    """設定靜音 HH HH — 修改靜音時段（靜音開始 靜音結束）"""
+    m = re.match(r"設定靜音\s+(\d{1,2})\s+(\d{1,2})$", text)
+    if not m:
+        return "格式：設定靜音 [靜音開始小時] [靜音結束小時]\n例：設定靜音 22 7\n（表示 22:00 至隔天 07:00 靜音）"
+    end_quiet   = int(m.group(1))  # allow_end（靜音開始）
+    start_allow = int(m.group(2))  # allow_start（靜音結束 = 推播開始）
+    if not (0 <= end_quiet <= 23 and 0 <= start_allow <= 23):
+        return "小時需在 0–23 之間"
+
+    set_setting("allow_end",   end_quiet)
+    set_setting("allow_start", start_allow)
+    return f"✅ 靜音時段已更新：{end_quiet:02d}:00 – {start_allow:02d}:00（台灣時間）\n立即生效。"
+
+
+def cmd_set_threshold(text):
+    """設定推播門檻 N — 修改活動觸發推播的新增筆數"""
+    m = re.match(r"設定推播門檻\s+(\d+)$", text)
+    if not m:
+        return "格式：設定推播門檻 [筆數]\n例：設定推播門檻 10"
+    n = int(m.group(1))
+    if n < 1:
+        return "門檻至少為 1"
+    set_setting("activity_threshold", n)
+    return f"✅ 活動觸發門檻已更新為 {n} 筆新增報名。\n立即生效。"
+
+
+def cmd_set_interval(text):
+    """設定推播間隔 N — 修改定時推播間隔小時"""
+    m = re.match(r"設定推播間隔\s+(\d+(?:\.\d+)?)$", text)
+    if not m:
+        return "格式：設定推播間隔 [小時]\n例：設定推播間隔 4"
+    n = float(m.group(1))
+    if n < 1:
+        return "間隔至少為 1 小時"
+    set_setting("interval_hours", n)
+    return f"✅ 定時推播間隔已更新為 {n} 小時。\n立即生效。"
 
 
 def cmd_admin_remove(group_id, user_id, text):
@@ -997,6 +1133,22 @@ def handle_message(event):
     elif re.match(r"更改\s+\d+\s+\S+\s+\S", text):
         reply = cmd_admin_rename(gid, uid, text)
 
+    # ── 推播設定
+    elif text in ("推播設定", "/推播設定"):
+        reply = cmd_show_settings()
+
+    elif re.match(r"設定推播\s+\d", text):
+        reply = cmd_set_broadcast_time(text)
+
+    elif re.match(r"設定靜音\s+\d+\s+\d+$", text):
+        reply = cmd_set_quiet(text)
+
+    elif re.match(r"設定推播門檻\s+\d+$", text):
+        reply = cmd_set_threshold(text)
+
+    elif re.match(r"設定推播間隔\s+\d", text):
+        reply = cmd_set_interval(text)
+
     # ── 說明
     elif text in ("說明", "/說明", "help", "/help", "幫助"):
         reply = HELP_TEXT
@@ -1032,19 +1184,21 @@ def handle_join(event):
 # ══════════════════════════════════════════
 
 def start_scheduler():
+    hour   = int(get_setting("broadcast_hour",   "7"))
+    minute = int(get_setting("broadcast_minute", "0"))
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI)
-    # 每天 07:00 早安推播
+    # 早安推播（時間從 DB 讀取）
     scheduler.add_job(
-        daily_broadcast, trigger="cron", hour=7, minute=0,
+        daily_broadcast, trigger="cron", hour=hour, minute=minute,
         id="daily_broadcast", replace_existing=True,
     )
-    # 每小時檢查：距上次推播 ≥ 6 小時 → 推播（22:00–07:00 不執行）
+    # 每小時整點後 5 分鐘：定時間隔檢查（靜音期自動跳過）
     scheduler.add_job(
         check_timed_broadcast, trigger="cron", minute=5,
         id="timed_broadcast", replace_existing=True,
     )
     scheduler.start()
-    logger.info("[排程] 已啟動：07:00 早安推播 + 每小時定時檢查（22:00–07:00 靜音）")
+    logger.info(f"[排程] 已啟動：{hour:02d}:{minute:02d} 早安推播 + 每小時定時檢查（靜音期跳過）")
     return scheduler
 
 
@@ -1054,10 +1208,11 @@ def start_scheduler():
 
 _startup_lock     = threading.Lock()
 _scheduler_started = False
+_scheduler         = None   # 全域 scheduler，供動態調整使用
 
 
 def _startup():
-    global _scheduler_started
+    global _scheduler_started, _scheduler
     with _startup_lock:
         try:
             init_db()
@@ -1070,7 +1225,7 @@ def _startup():
 
         if not _scheduler_started and (not in_gunicorn or is_worker):
             try:
-                start_scheduler()
+                _scheduler = start_scheduler()
                 _scheduler_started = True
             except Exception as e:
                 logger.error(f"[startup] 排程器啟動失敗: {e}")

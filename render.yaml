@@ -12,4 +12,4 @@ services:
       - key: LINE_CHANNEL_SECRET
         sync: false
       - key: DB_PATH
-        value: jielong.db
+        value: /data/jielong.db
