@@ -81,7 +81,8 @@ HELP_TEXT = """📖 接龍助理使用說明
 設定推播間隔 4        — 改定時推播間隔（小時）
 
 ─────────────────
-📌 早安推播 + 6次報名觸發 + 每6小時定時（22:00–07:00靜音）"""
+📌 早安推播 + 6次報名觸發 + 每6小時定時（22:00–07:00靜音）
+📅 每週日 20:00 自動推播下週工作預告"""
 
 
 # ══════════════════════════════════════════
@@ -669,6 +670,86 @@ def vacancy_reminder():
             logger.info(f"[提醒] 已推播至 {lst[1]}：{len(unfilled)} 項空缺")
         except Exception as e:
             logger.error(f"[提醒] 推播失敗 {lst[1]}: {e}")
+
+
+def _parse_slot_date(date_str):
+    """將 slot 的 date_str（如 '3/1'）解析為 date 物件（自動判斷年份）"""
+    try:
+        now = datetime.now(TZ_TAIPEI)
+        m, d = date_str.split("/")
+        dt = now.replace(month=int(m), day=int(d)).date()
+        # 如果日期已過超過半年，推測為明年
+        if dt < now.date() - timedelta(days=180):
+            dt = dt.replace(year=now.year + 1)
+        return dt
+    except Exception:
+        return None
+
+
+def weekly_reminder():
+    """每週日推播：下週的工作排班總覽"""
+    active_lists = get_all_active_lists()
+    if not active_lists:
+        return
+
+    now = datetime.now(TZ_TAIPEI).date()
+    # 計算下週一到下週日
+    days_until_monday = (7 - now.weekday()) % 7
+    if days_until_monday == 0:
+        days_until_monday = 1  # 今天是週日，下週一是明天
+    next_monday = now + timedelta(days=days_until_monday)
+    next_sunday = next_monday + timedelta(days=6)
+
+    logger.info(f"[週報] 下週範圍: {next_monday} ~ {next_sunday}")
+
+    for lst in active_lists:
+        if _list_type(lst) != "schedule":
+            continue
+
+        list_id = lst[0]
+        slots   = get_slots(list_id)
+        signups = get_slot_signups(list_id)
+
+        # 篩選下週的工作項目
+        next_week_slots = []
+        for s in slots:
+            dt = _parse_slot_date(s[3])
+            if dt and next_monday <= dt <= next_sunday:
+                next_week_slots.append(s)
+
+        if not next_week_slots:
+            continue
+
+        lines = [
+            f"📅 下週工作預告（{next_monday.strftime('%m/%d')}–{next_sunday.strftime('%m/%d')}）",
+            f"📋 {lst[2]}",
+            "─" * 16,
+        ]
+        for s in next_week_slots:
+            sn       = s[2]
+            required = s[8]
+            names    = signups.get(sn, [])
+            current  = len(names)
+            label    = f"{sn}. {_slot_label(s)}"
+
+            if names:
+                label += f"\n   👤 {'、'.join(names)}"
+            else:
+                label += "\n   ⚠️ 尚無人報名"
+
+            if _is_strict_slot(s) and current < required:
+                label += f"（缺{required - current}人）"
+
+            lines.append(label)
+
+        lines.append("─" * 16)
+        lines.append("報名：+編號 姓名  或  編號. 姓名")
+
+        try:
+            line_bot_api.push_message(lst[1], TextSendMessage(text="\n".join(lines)))
+            logger.info(f"[週報] 已推播至 {lst[1]}：{len(next_week_slots)} 項")
+        except Exception as e:
+            logger.error(f"[週報] 推播失敗 {lst[1]}: {e}")
 
 
 # ══════════════════════════════════════════
@@ -1291,6 +1372,12 @@ def cmd_close(group_id, user_id):
     if not active:
         return "目前沒有進行中的接龍。"
 
+    # 只有發起人才能結束接龍
+    creator_id = active[3]
+    if user_id != creator_id:
+        creator_name = active[4] or "發起人"
+        return f"⚠️ 只有發起人（{creator_name}）才能結束接龍。"
+
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('UPDATE lists SET status="closed" WHERE id=?', (active[0],))
@@ -1530,9 +1617,14 @@ def start_scheduler():
         vacancy_reminder, trigger="cron", hour=12, minute=0,
         id="vacancy_reminder", replace_existing=True,
     )
+    # 每週日 20:00 推播下週工作預告
+    scheduler.add_job(
+        weekly_reminder, trigger="cron", day_of_week="sun", hour=20, minute=0,
+        id="weekly_reminder", replace_existing=True,
+    )
 
     scheduler.start()
-    logger.info("[排程] 已啟動（早安 07:00 + 提醒 12:00 + 每小時定時檢查）")
+    logger.info("[排程] 已啟動（早安 07:00 + 提醒 12:00 + 週日 20:00 週報 + 每小時定時檢查）")
 
     # 啟動後再讀 DB 設定，若與預設不同則更新
     try:
