@@ -775,10 +775,10 @@ def _join_slot(group_id, user_id, user_name, text, active):
 
     required = slot[8]
 
-    # 同一人重複報名同一項目 → 更新姓名
+    # 同一姓名重複報名同一項目 → 更新（防止重複，允許同一人幫多人報名）
     c.execute(
-        "SELECT id FROM entries WHERE list_id=? AND user_id=? AND slot_num=?",
-        (list_id, user_id, slot_num),
+        "SELECT id FROM entries WHERE list_id=? AND user_name=? AND slot_num=?",
+        (list_id, name, slot_num),
     )
     existing = c.fetchone()
     if existing:
@@ -876,10 +876,10 @@ def cmd_join_multi(group_id, user_id, user_name, text):
 
         required = slot[8]
 
-        # 同一人重複報名 → 更新
+        # 同一姓名重複報名 → 更新（防止重複，允許同一人幫多人報名）
         c.execute(
-            "SELECT id FROM entries WHERE list_id=? AND user_id=? AND slot_num=?",
-            (list_id, user_id, slot_num),
+            "SELECT id FROM entries WHERE list_id=? AND user_name=? AND slot_num=?",
+            (list_id, name, slot_num),
         )
         existing = c.fetchone()
         if existing:
