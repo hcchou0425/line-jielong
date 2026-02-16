@@ -1237,46 +1237,40 @@ def handle_join(event):
 # ══════════════════════════════════════════
 
 def start_scheduler():
-    hour   = int(get_setting("broadcast_hour",   "7"))
-    minute = int(get_setting("broadcast_minute", "0"))
+    """啟動排程器（先用預設值，再從 DB 更新時間）"""
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI)
-    # 早安推播（時間從 DB 讀取）
+    # 先以預設值 07:00 啟動，避免啟動時查 DB 造成阻塞
     scheduler.add_job(
-        daily_broadcast, trigger="cron", hour=hour, minute=minute,
+        daily_broadcast, trigger="cron", hour=7, minute=0,
         id="daily_broadcast", replace_existing=True,
     )
-    # 每小時整點後 5 分鐘：定時間隔檢查（靜音期自動跳過）
     scheduler.add_job(
         check_timed_broadcast, trigger="cron", minute=5,
         id="timed_broadcast", replace_existing=True,
     )
     scheduler.start()
-    logger.info(f"[排程] 已啟動：{hour:02d}:{minute:02d} 早安推播 + 每小時定時檢查（靜音期跳過）")
+    logger.info("[排程] 已啟動（預設 07:00）+ 每小時定時檢查")
+
+    # 啟動後再讀 DB 設定，若與預設不同則更新
+    try:
+        hour   = int(get_setting("broadcast_hour",   "7"))
+        minute = int(get_setting("broadcast_minute", "0"))
+        if (hour, minute) != (7, 0):
+            scheduler.reschedule_job(
+                "daily_broadcast", trigger="cron", hour=hour, minute=minute,
+            )
+            logger.info(f"[排程] 更新早安推播為 {hour:02d}:{minute:02d}")
+    except Exception as e:
+        logger.warning(f"[排程] 讀取推播時間設定失敗（使用預設 07:00）: {e}")
+
     return scheduler
 
 
-# ══════════════════════════════════════════
-# 啟動初始化（模組層級，gunicorn 和直接執行都適用）
-# ══════════════════════════════════════════
-
-_startup_lock     = threading.Lock()
-_scheduler_started = False
-_scheduler         = None   # 全域 scheduler，供動態調整使用
-
-
-def _startup():
+def _start_scheduler_once():
+    """安全地啟動一次排程器（可從 gunicorn post_worker_init 或直接執行呼叫）"""
     global _scheduler_started, _scheduler
     with _startup_lock:
-        try:
-            init_db()
-            logger.info("[startup] 資料庫初始化完成")
-        except Exception as e:
-            logger.error(f"[startup] 資料庫初始化失敗: {e}")
-
-        in_gunicorn = "gunicorn" in os.environ.get("SERVER_SOFTWARE", "")
-        is_worker   = os.environ.get("GUNICORN_WORKER", "") == "1"
-
-        if not _scheduler_started and (not in_gunicorn or is_worker):
+        if not _scheduler_started:
             try:
                 _scheduler = start_scheduler()
                 _scheduler_started = True
@@ -1284,7 +1278,30 @@ def _startup():
                 logger.error(f"[startup] 排程器啟動失敗: {e}")
 
 
+# ══════════════════════════════════════════
+# 啟動初始化（模組層級）
+# ══════════════════════════════════════════
+
+_startup_lock      = threading.Lock()
+_scheduler_started = False
+_scheduler         = None   # 全域 scheduler，供動態調整使用
+
+
+def _startup():
+    """模組載入時執行：只做 DB 初始化。排程器由 gunicorn post_worker_init 啟動。"""
+    try:
+        init_db()
+        logger.info("[startup] 資料庫初始化完成")
+    except Exception as e:
+        logger.error(f"[startup] 資料庫初始化失敗: {e}")
+
+
 _startup()
+
+
+# 非 gunicorn 環境（直接 python app.py）→ 立即啟動排程器
+if not os.environ.get("GUNICORN_WORKER") and "gunicorn" not in os.environ.get("SERVER_SOFTWARE", ""):
+    _start_scheduler_once()
 
 
 if __name__ == "__main__":
