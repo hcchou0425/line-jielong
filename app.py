@@ -49,8 +49,9 @@ HELP_TEXT = """📖 接龍助理使用說明
 
 +[編號] 你的名字      — 報名特定工作
 +3 小明              — 報名第3項
++3 小明 小華 家和    — 同一項目報多人
 3. 小明              — 同上（與列表格式一致）
-+1 +3 +5 小明        — 一次報名多個項目
++1 +3 +5 小明        — 一人報名多個項目
 幫報 [編號] [姓名]   — 代替他人報名
 退出 [編號]          — 取消特定項目報名
 列表              — 查看目前報名狀況
@@ -764,15 +765,16 @@ def cmd_join(group_id, user_id, user_name, text):
 
 
 def _join_slot(group_id, user_id, user_name, text, active):
-    """排班模式：+3 小明 → 報名第 3 號工作"""
+    """排班模式：+3 小明 → 報名第 3 號工作（支援 +3 小明 小華 家和 多人報名）"""
     list_id = active[0]
 
     m = re.match(r"\+(\d+)\s*(.*)", text)
     if not m:
         return "格式：+[編號] 你的名字\n例：+3 小明\n（輸入「列表」查看可報名項目）"
 
-    slot_num = int(m.group(1))
-    name     = m.group(2).strip() or user_name or "（未知）"
+    slot_num  = int(m.group(1))
+    name_part = m.group(2).strip()
+    names     = name_part.split() if name_part else [user_name or "（未知）"]
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -786,36 +788,71 @@ def _join_slot(group_id, user_id, user_name, text, active):
 
     required = slot[8]
 
-    # 同一姓名重複報名同一項目 → 更新（防止重複，允許同一人幫多人報名）
-    c.execute(
-        "SELECT id FROM entries WHERE list_id=? AND user_name=? AND slot_num=?",
-        (list_id, name, slot_num),
-    )
-    existing = c.fetchone()
-    if existing:
-        c.execute("UPDATE entries SET user_name=? WHERE id=?", (name, existing[0]))
+    # 單人報名走簡化流程
+    if len(names) == 1:
+        name = names[0]
+        c.execute(
+            "SELECT id FROM entries WHERE list_id=? AND user_name=? AND slot_num=?",
+            (list_id, name, slot_num),
+        )
+        existing = c.fetchone()
+        if existing:
+            conn.close()
+            return f"⚠️ {name} 已報名 {slot_num}. {_slot_label(slot)}"
+
+        if required > 1:
+            c.execute(
+                "SELECT COUNT(*) FROM entries WHERE list_id=? AND slot_num=?",
+                (list_id, slot_num),
+            )
+            if c.fetchone()[0] >= required:
+                conn.close()
+                return f"❌ 第 {slot_num} 號已額滿（{required} 人）！"
+
+        c.execute(
+            "INSERT INTO entries (list_id, user_id, user_name, slot_num, seq) VALUES (?, ?, ?, ?, ?)",
+            (list_id, user_id, name, slot_num, slot_num),
+        )
         conn.commit()
         conn.close()
-        return f"✏️ 已更新！\n{slot_num}. {_slot_label(slot)} → {name}"
+        check_activity_broadcast(list_id)
+        return f"✅ 報名成功！\n{slot_num}. {_slot_label(slot)} → {name}\n（輸入「列表」查看完整名單）"
 
-    # 檢查額滿（required > 1 才限制名額）
-    if required > 1:
+    # 多人報名
+    results = []
+    any_inserted = False
+    for name in names:
         c.execute(
-            "SELECT COUNT(*) FROM entries WHERE list_id=? AND slot_num=?",
-            (list_id, slot_num),
+            "SELECT id FROM entries WHERE list_id=? AND user_name=? AND slot_num=?",
+            (list_id, name, slot_num),
         )
-        if c.fetchone()[0] >= required:
-            conn.close()
-            return f"❌ 第 {slot_num} 號已額滿（{required} 人）！"
+        if c.fetchone():
+            results.append(f"⚠️ {name}（已報名）")
+            continue
 
-    c.execute(
-        "INSERT INTO entries (list_id, user_id, user_name, slot_num, seq) VALUES (?, ?, ?, ?, ?)",
-        (list_id, user_id, name, slot_num, slot_num),
-    )
+        if required > 1:
+            c.execute(
+                "SELECT COUNT(*) FROM entries WHERE list_id=? AND slot_num=?",
+                (list_id, slot_num),
+            )
+            if c.fetchone()[0] >= required:
+                results.append(f"❌ {name}（已額滿）")
+                continue
+
+        c.execute(
+            "INSERT INTO entries (list_id, user_id, user_name, slot_num, seq) VALUES (?, ?, ?, ?, ?)",
+            (list_id, user_id, name, slot_num, slot_num),
+        )
+        results.append(f"✅ {name}")
+        any_inserted = True
+
     conn.commit()
     conn.close()
-    check_activity_broadcast(list_id)
-    return f"✅ 報名成功！\n{slot_num}. {_slot_label(slot)} → {name}\n（輸入「列表」查看完整名單）"
+    if any_inserted:
+        check_activity_broadcast(list_id)
+
+    header = f"📋 {slot_num}. {_slot_label(slot)} 報名結果："
+    return header + "\n" + "\n".join(results)
 
 
 def _join_simple(group_id, user_id, user_name, text, active):
