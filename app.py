@@ -54,6 +54,7 @@ HELP_TEXT = """📖 接龍助理使用說明
 幫報 [編號] [姓名]   — 代替他人報名
 退出 [編號]          — 取消特定項目報名
 列表              — 查看目前報名狀況
+空缺              — 列出尚未認領的工作
 結束接龍          — 封存最終名單
 
 【開團者專用】
@@ -1182,6 +1183,43 @@ def cmd_admin_rename(group_id, user_id, text):
         return f"找不到第 {slot_num} 號中的「{old_name}」。"
 
 
+def cmd_vacancy(group_id):
+    """手動查詢尚未認領的工作項目"""
+    active = get_active_list(group_id)
+    if not active:
+        return "目前沒有進行中的接龍。"
+
+    if _list_type(active) != "schedule":
+        return "此功能僅適用於排班模式的接龍。"
+
+    list_id = active[0]
+    slots   = get_slots(list_id)
+    signups = get_slot_signups(list_id)
+
+    unfilled = []
+    for s in slots:
+        sn       = s[2]
+        required = s[8]
+        current  = len(signups.get(sn, []))
+        if current < required:
+            unfilled.append((s, current, required))
+
+    if not unfilled:
+        return f"🎉 {active[2]}\n\n所有工作都已認領完畢！"
+
+    lines = [f"📋 {active[2]}", "以下項目尚未認領，歡迎報名！", "─" * 16]
+    for s, current, required in unfilled:
+        sn    = s[2]
+        label = f"{sn}. {_slot_label(s)}"
+        if required > 1:
+            label += f"  （已{current}/{required}人）"
+        lines.append(label)
+    lines.append("─" * 16)
+    lines.append(f"共 {len(unfilled)} 項空缺")
+    lines.append("報名：+編號 姓名  或  編號. 姓名")
+    return "\n".join(lines)
+
+
 def cmd_list(group_id):
     active = get_active_list(group_id)
     if not active:
@@ -1350,6 +1388,10 @@ def handle_message(event):
     # ── 查看名單
     elif text in ("列表", "/列表", "查看", "名單"):
         reply = cmd_list(gid)
+
+    # ── 查看空缺
+    elif text in ("空缺", "缺人", "未認領", "誰沒報"):
+        reply = cmd_vacancy(gid)
 
     # ── 結束
     elif text in ("結束接龍", "結團", "/結束接龍", "/結團", "關閉接龍"):
