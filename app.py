@@ -39,6 +39,7 @@ DATE_RE      = re.compile(r'(\d{1,2}/\d{1,2})\s*[（(]([一二三四五六日ㄧ
 COUNT_RE     = re.compile(r'(\d+)\s*人')
 TIME_RE      = re.compile(r'\d{1,2}:\d{2}(?:\s*[-–]\s*\d{1,2}:\d{2})?')
 SESSION_RE   = re.compile(r'^\s*(上午|下午)\s*[：:](.*)')
+PREFILL_RE   = re.compile(r'^\s*\d+[.．、]\s*(.+\S)')  # 「1. 小白」式預填
 
 HELP_TEXT = """📖 接龍助理使用說明
 ─────────────────
@@ -306,15 +307,35 @@ def is_schedule_post(text):
     return len(DATE_RE.findall(text)) >= 2
 
 
+_TITLE_SKIP = re.compile(r'^[/]?(?:接龍|開團)\s*$|^親愛的|^大家好|^平安|^各位|^Hello|^嗨')
+
+def _extract_title(text):
+    """從排班表文字中萃取有意義的標題，跳過問候語和接龍關鍵字"""
+    for line in text.strip().split("\n")[:12]:
+        line = line.strip()
+        if not line or DATE_RE.search(line):
+            continue
+        if _TITLE_SKIP.search(line):
+            continue
+        title = re.sub(r'[：:如下\s]+$', '', line).strip()
+        if title:
+            return title
+    return "工作認養排班"
+
+
 def parse_schedule_slots(text):
     """
-    解析工作認養排班表，回傳 slot list。
-    每個 slot：{slot_num, date_str, day_str, activity, time_str, session, required_count, note}
-    有「上午：/ 下午：」的工作項目會拆成兩個 slot。
+    解析工作認養排班表，回傳 (slots, prefilled)。
+    - slots:     list of slot dicts
+    - prefilled: {slot_num: [name, ...]}  ← 排班表中已填寫的姓名
+    支援兩種預填格式：
+      「上午 : 小珍」→ session 預填
+      「1. 小白」    → 編號列表預填
     """
-    slots = []
-    slot_num = 1
-    lines = text.split("\n")
+    slots     = []
+    prefilled = {}   # slot_num → [name, ...]
+    slot_num  = 1
+    lines     = text.split("\n")
 
     i = 0
     while i < len(lines):
@@ -342,9 +363,11 @@ def parse_schedule_slots(text):
             time_str = time_match.group().strip()
             after = (after[:time_match.start()] + after[time_match.end():]).strip()
 
-        activity     = after.strip()
-        sessions     = []   # 收集到的 ['上午','下午']
-        note_parts   = []
+        activity      = after.strip()
+        sessions      = []   # 收集到的 session 名稱 ['上午','下午']
+        session_names = {}   # {'上午': '小珍', '下午': '小明'}
+        note_parts    = []
+        prefill_names = []   # 編號列表預填：['小白']
 
         # 掃描後續行，直到空行或下一個日期
         j = i + 1
@@ -358,47 +381,64 @@ def parse_schedule_slots(text):
 
             sm = SESSION_RE.match(nl)
             if sm:
-                sess = sm.group(1)
+                sess      = sm.group(1)
+                name_part = sm.group(2).strip().lstrip(':：').strip()
                 if sess not in sessions:
                     sessions.append(sess)
+                if name_part:
+                    session_names[sess] = name_part
             elif TIME_RE.search(nl) and not time_str:
                 time_str = nl.strip()
             else:
-                note_parts.append(nl)
+                pm = PREFILL_RE.match(nl)
+                if pm:
+                    name = pm.group(1).strip()
+                    if name:
+                        prefill_names.append(name)
+                else:
+                    note_parts.append(nl)
             j += 1
 
         note = " ".join(note_parts).strip()
 
         if sessions:
-            # 有上午/下午 → 各建一個 slot（確保兩個都有）
+            # 有上午/下午 → 只建出現在文字中的 session slot
             for sess in ["上午", "下午"]:
+                if sess not in sessions:
+                    continue
+                sn = slot_num
                 slots.append({
-                    "slot_num":      slot_num,
-                    "date_str":      date_str,
-                    "day_str":       day_str,
-                    "activity":      activity,
-                    "time_str":      time_str,
-                    "session":       sess,
+                    "slot_num":       sn,
+                    "date_str":       date_str,
+                    "day_str":        day_str,
+                    "activity":       activity,
+                    "time_str":       time_str,
+                    "session":        sess,
                     "required_count": required,
-                    "note":          note,
+                    "note":           note,
                 })
+                if sess in session_names:
+                    prefilled[sn] = [session_names[sess]]
                 slot_num += 1
         else:
+            sn = slot_num
             slots.append({
-                "slot_num":      slot_num,
-                "date_str":      date_str,
-                "day_str":       day_str,
-                "activity":      activity,
-                "time_str":      time_str,
-                "session":       None,
+                "slot_num":       sn,
+                "date_str":       date_str,
+                "day_str":        day_str,
+                "activity":       activity,
+                "time_str":       time_str,
+                "session":        None,
                 "required_count": required,
-                "note":          note,
+                "note":           note,
             })
+            if prefill_names:
+                prefilled[sn] = prefill_names
             slot_num += 1
 
         i = j
 
-    return slots
+    return slots, prefilled
 
 
 # ══════════════════════════════════════════
@@ -563,14 +603,11 @@ def check_activity_broadcast(list_id):
 
 def cmd_post_schedule(group_id, user_id, user_name, text):
     """解析排班表並建立排班型接龍"""
-    slots = parse_schedule_slots(text)
+    slots, prefilled = parse_schedule_slots(text)
     if not slots:
         return "找不到日期資料，無法建立排班表。請確認格式如：3/1（日）活動名稱"
 
-    # 標題：取第一行若非日期行，否則用預設
-    first_line = text.strip().split("\n")[0].strip()
-    title = first_line if not DATE_RE.search(first_line) else "工作認養排班"
-    title = re.sub(r"[：:如下]+$", "", title).strip() or "工作認養排班"
+    title = _extract_title(text)
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -581,6 +618,7 @@ def cmd_post_schedule(group_id, user_id, user_name, text):
         (group_id, title, user_id, user_name),
     )
     list_id = c.lastrowid
+
     for s in slots:
         c.execute(
             "INSERT INTO slots (list_id,slot_num,date_str,day_str,activity,time_str,session,required_count,note)"
@@ -588,18 +626,33 @@ def cmd_post_schedule(group_id, user_id, user_name, text):
             (list_id, s["slot_num"], s["date_str"], s["day_str"], s["activity"],
              s["time_str"], s["session"], s["required_count"], s["note"]),
         )
+
+    # 將排班表中已填寫的姓名預先寫入 entries
+    for sn, names in prefilled.items():
+        for name in names:
+            proxy_uid = f"__prefill__{sn}__{name}"
+            c.execute(
+                "INSERT INTO entries (list_id, user_id, user_name, slot_num, seq, registered_by)"
+                " VALUES (?, ?, ?, ?, ?, '__prefilled__')",
+                (list_id, proxy_uid, name, sn, sn),
+            )
+
     conn.commit()
     conn.close()
 
     lines = [f"✅ 排班表已建立！\n📋 {title}\n共 {len(slots)} 個工作項目\n─────────────────"]
     for s in slots:
-        label = f"{s['slot_num']}. {s['date_str']}（{s['day_str']}）{s['activity']}"
+        sn    = s["slot_num"]
+        label = f"{sn}. {s['date_str']}（{s['day_str']}）{s['activity']}"
         if s["session"]:
             label += f" {s['session']}"
         if s["time_str"]:
             label += f" {s['time_str']}"
         if s["required_count"] > 1:
             label += f" {s['required_count']}人"
+        # 顯示預填姓名
+        if sn in prefilled:
+            label += f"  ✓ {'、'.join(prefilled[sn])}"
         lines.append(label)
     lines.append("\n報名方式：\n+[編號] 你的名字\n例：+3 小明\n（或只輸入 +3，用LINE暱稱報名）")
     return "\n".join(lines)
