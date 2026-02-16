@@ -1162,6 +1162,11 @@ def handle_message(event):
     elif re.match(r"\+\d+(\s|$)", text):
         reply = cmd_join(gid, uid, lazy_name(), text)
 
+    # ── 加入（N. 姓名 格式，與列表顯示一致）
+    elif re.match(r"^\d+[\.．]\s*\S", text):
+        m_dot = re.match(r"^(\d+)[\.．]\s*(.*)", text)
+        reply = cmd_join(gid, uid, lazy_name(), f"+{m_dot.group(1)} {m_dot.group(2).strip()}")
+
     # ── 查看名單
     elif text in ("列表", "/列表", "查看", "名單"):
         reply = cmd_list(gid)
