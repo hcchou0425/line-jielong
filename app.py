@@ -463,6 +463,12 @@ def parse_schedule_slots(text):
 # 格式化顯示
 # ══════════════════════════════════════════
 
+def _is_strict_slot(slot):
+    """判斷此項目是否嚴格限制人數（只有「值班」類工作才限額）"""
+    activity = (slot[5] or "").lower()
+    return "值班" in activity
+
+
 def _slot_label(slot):
     """slot tuple → 單行文字，如「3/18（三）苓雅共修處值班 上午」"""
     date_str = slot[3]
@@ -491,7 +497,7 @@ def format_schedule_list(list_row, slots, signups, *, show_time=False):
         slot_num = s[2]
         required = s[8]
         header   = f"{slot_num}. {_slot_label(s)}"
-        if required > 1:
+        if _is_strict_slot(s) and required > 1:
             header += f"（共{required}人）"
         lines.append(header)
         names = signups.get(slot_num, [])
@@ -640,7 +646,9 @@ def vacancy_reminder():
             sn       = s[2]
             required = s[8]
             current  = len(signups.get(sn, []))
-            if current < required:
+            if _is_strict_slot(s) and current < required:
+                unfilled.append((s, current, required))
+            elif not _is_strict_slot(s) and current == 0:
                 unfilled.append((s, current, required))
 
         if not unfilled:
@@ -650,7 +658,7 @@ def vacancy_reminder():
         for s, current, required in unfilled:
             sn    = s[2]
             label = f"{sn}. {_slot_label(s)}"
-            if required > 1:
+            if _is_strict_slot(s) and required > 1:
                 label += f"  （已{current}/{required}人）"
             lines.append(label)
         lines.append("─" * 16)
@@ -800,7 +808,7 @@ def _join_slot(group_id, user_id, user_name, text, active):
             conn.close()
             return f"⚠️ {name} 已報名 {slot_num}. {_slot_label(slot)}"
 
-        if required > 1:
+        if _is_strict_slot(slot):
             c.execute(
                 "SELECT COUNT(*) FROM entries WHERE list_id=? AND slot_num=?",
                 (list_id, slot_num),
@@ -830,7 +838,7 @@ def _join_slot(group_id, user_id, user_name, text, active):
             results.append(f"⚠️ {name}（已報名）")
             continue
 
-        if required > 1:
+        if _is_strict_slot(slot):
             c.execute(
                 "SELECT COUNT(*) FROM entries WHERE list_id=? AND slot_num=?",
                 (list_id, slot_num),
@@ -935,8 +943,8 @@ def cmd_join_multi(group_id, user_id, user_name, text):
             results.append(f"✏️ {slot_num}. {_slot_label(slot)}（更新）")
             continue
 
-        # 額滿檢查
-        if required > 1:
+        # 額滿檢查（僅值班類工作限額）
+        if _is_strict_slot(slot):
             c.execute(
                 "SELECT COUNT(*) FROM entries WHERE list_id=? AND slot_num=?",
                 (list_id, slot_num),
@@ -997,8 +1005,8 @@ def cmd_proxy_join(group_id, user_id, user_name, text):
         conn.close()
         return f"❌ {name} 已在第 {slot_num} 號工作中了。"
 
-    # 檢查額滿
-    if required > 1:
+    # 檢查額滿（僅值班類工作限額）
+    if _is_strict_slot(slot):
         c.execute("SELECT COUNT(*) FROM entries WHERE list_id=? AND slot_num=?", (list_id, slot_num))
         if c.fetchone()[0] >= required:
             conn.close()
@@ -1238,7 +1246,9 @@ def cmd_vacancy(group_id):
         sn       = s[2]
         required = s[8]
         current  = len(signups.get(sn, []))
-        if current < required:
+        if _is_strict_slot(s) and current < required:
+            unfilled.append((s, current, required))
+        elif not _is_strict_slot(s) and current == 0:
             unfilled.append((s, current, required))
 
     if not unfilled:
@@ -1248,7 +1258,7 @@ def cmd_vacancy(group_id):
     for s, current, required in unfilled:
         sn    = s[2]
         label = f"{sn}. {_slot_label(s)}"
-        if required > 1:
+        if _is_strict_slot(s) and required > 1:
             label += f"  （已{current}/{required}人）"
         lines.append(label)
     lines.append("─" * 16)
