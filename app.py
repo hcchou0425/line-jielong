@@ -87,6 +87,16 @@ HELP_TEXT = """📖 接龍助理使用說明
 # ══════════════════════════════════════════
 
 def init_db():
+    # 確保資料庫目錄存在
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir and not os.path.exists(db_dir):
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+            logger.info(f"[startup] 建立資料庫目錄: {db_dir}")
+        except OSError as e:
+            logger.warning(f"[startup] 無法建立 {db_dir}: {e}，改用當前目錄")
+            global DB_PATH
+            DB_PATH = "jielong.db"
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
@@ -1483,20 +1493,23 @@ _scheduler         = None   # 全域 scheduler，供動態調整使用
 
 
 def _startup():
-    """模組載入時：初始化 DB，並在背景執行緒延遲啟動排程器（避免阻塞 port 綁定）"""
-    try:
-        init_db()
-        logger.info("[startup] 資料庫初始化完成")
-    except Exception as e:
-        logger.error(f"[startup] 資料庫初始化失敗: {e}")
+    """模組載入時：在背景執行緒初始化 DB 並延遲啟動排程器（避免阻塞 port 綁定）"""
 
-    def _delayed_scheduler():
+    def _delayed_init():
         import time
-        time.sleep(3)   # 等 gunicorn 完成 port 綁定
+        # 先初始化 DB
+        try:
+            init_db()
+            logger.info("[startup] 資料庫初始化完成")
+        except Exception as e:
+            logger.error(f"[startup] 資料庫初始化失敗: {e}")
+        # 等 gunicorn 完成 port 綁定後再啟動排程器
+        time.sleep(3)
         _start_scheduler_once()
 
-    t = threading.Thread(target=_delayed_scheduler, daemon=True)
+    t = threading.Thread(target=_delayed_init, daemon=True)
     t.start()
+    logger.info("[startup] 背景初始化執行緒已啟動")
 
 
 _startup()
