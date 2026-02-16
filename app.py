@@ -88,6 +88,7 @@ HELP_TEXT = """📖 接龍助理使用說明
 # ══════════════════════════════════════════
 
 def init_db():
+    global DB_PATH
     # 確保資料庫目錄存在
     db_dir = os.path.dirname(DB_PATH)
     if db_dir and not os.path.exists(db_dir):
@@ -96,7 +97,6 @@ def init_db():
             logger.info(f"[startup] 建立資料庫目錄: {db_dir}")
         except OSError as e:
             logger.warning(f"[startup] 無法建立 {db_dir}: {e}，改用當前目錄")
-            global DB_PATH
             DB_PATH = "jielong.db"
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
