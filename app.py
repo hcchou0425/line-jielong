@@ -1288,20 +1288,23 @@ _scheduler         = None   # 全域 scheduler，供動態調整使用
 
 
 def _startup():
-    """模組載入時執行：只做 DB 初始化。排程器由 gunicorn post_worker_init 啟動。"""
+    """模組載入時：初始化 DB，並在背景執行緒延遲啟動排程器（避免阻塞 port 綁定）"""
     try:
         init_db()
         logger.info("[startup] 資料庫初始化完成")
     except Exception as e:
         logger.error(f"[startup] 資料庫初始化失敗: {e}")
 
+    def _delayed_scheduler():
+        import time
+        time.sleep(3)   # 等 gunicorn 完成 port 綁定
+        _start_scheduler_once()
+
+    t = threading.Thread(target=_delayed_scheduler, daemon=True)
+    t.start()
+
 
 _startup()
-
-
-# 非 gunicorn 環境（直接 python app.py）→ 立即啟動排程器
-if not os.environ.get("GUNICORN_WORKER") and "gunicorn" not in os.environ.get("SERVER_SOFTWARE", ""):
-    _start_scheduler_once()
 
 
 if __name__ == "__main__":
