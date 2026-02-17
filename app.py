@@ -54,8 +54,7 @@ HELP_TEXT = """📖 接龍指令說明
 【負責人】
 重新開團／結束接龍
 清除 編號／移除 編號 姓名
-更改 編號 舊名 新名
-設定提醒 HH:MM／關閉"""
+更改 編號 舊名 新名"""
 
 
 # ══════════════════════════════════════════
@@ -134,9 +133,6 @@ def init_db():
         ("allow_end",           "22"),  # 允許推播結束（不含）→ 22:00 後靜音
         ("activity_threshold",  "6"),   # 新增幾筆觸發即時推播
         ("interval_hours",      "6"),   # 定時推播間隔小時
-        ("reminder_hour",       "12"),  # 空缺提醒小時（預設 12:00）
-        ("reminder_minute",     "0"),   # 空缺提醒分鐘
-        ("reminder_enabled",    "1"),   # 空缺提醒開關（1=開, 0=關）
     ]
     c.executemany(
         "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", defaults
@@ -621,54 +617,7 @@ def _check_all_filled_notify(list_id, group_id, lst=None):
         logger.error(f"[通知] 推播失敗 {group_id}: {e}")
 
 
-def vacancy_reminder():
-    """定時推播：各群組尚未額滿的工作項目"""
-    if not is_broadcast_allowed():
-        return
-    if get_setting("reminder_enabled", "1") != "1":
-        return
-
-    active_lists = get_all_active_lists()
-    if not active_lists:
-        return
-
-    logger.info("[提醒] 開始推播空缺項目")
-    for lst in active_lists:
-        if _list_type(lst) != "schedule":
-            continue
-
-        list_id = lst[0]
-        slots   = get_slots(list_id)
-        signups = get_slot_signups(list_id)
-
-        unfilled = []
-        for s in slots:
-            sn       = s[2]
-            required = s[8]
-            current  = len(signups.get(sn, []))
-            if _is_strict_slot(s) and current < required:
-                unfilled.append((s, current, required))
-            elif not _is_strict_slot(s) and current == 0:
-                unfilled.append((s, current, required))
-
-        if not unfilled:
-            continue
-
-        lines = [f"📢 {lst[2]}", "以下項目尚有空缺，歡迎認養！", "─" * 16]
-        for s, current, required in unfilled:
-            sn    = s[2]
-            label = f"【{sn}】{_slot_label(s)}"
-            if required > 1:
-                label += f"  （{current}/{required}人）"
-            lines.append(label)
-        lines.append("─" * 16)
-        # (說明已移至「接龍說明」指令)
-
-        try:
-            line_bot_api.push_message(lst[1], TextSendMessage(text="\n".join(lines)))
-            logger.info(f"[提醒] 已推播至 {lst[1]}：{len(unfilled)} 項空缺")
-        except Exception as e:
-            logger.error(f"[提醒] 推播失敗 {lst[1]}: {e}")
+## vacancy_reminder 已移除 — 空缺提醒改為手動輸入「空缺」查詢
 
 
 def _parse_slot_date(date_str):
@@ -1157,23 +1106,16 @@ def cmd_show_settings():
     a2  = get_setting("allow_end",         "22")
     th  = get_setting("activity_threshold","6")
     iv  = get_setting("interval_hours",    "6")
-    rh  = get_setting("reminder_hour",     "12")
-    rm  = get_setting("reminder_minute",   "0")
-    ren = get_setting("reminder_enabled",  "1")
-    reminder_status = f"每天 {int(rh):02d}:{int(rm):02d}" if ren == "1" else "已關閉"
     return (
         f"📋 目前推播設定\n"
         f"─────────────────\n"
         f"⏰ 早安推播：每天 {int(h):02d}:{int(m):02d}\n"
-        f"🔔 空缺提醒：{reminder_status}\n"
         f"🔇 靜音時段：{int(a2):02d}:00 – {int(a1):02d}:00\n"
         f"📊 活動門檻：新增 {th} 筆報名即推播\n"
         f"🕐 定時間隔：每 {iv} 小時推播一次\n"
         f"─────────────────\n"
         f"修改指令：\n"
         f"設定推播 08:00      — 改早安時間\n"
-        f"設定提醒 12:00      — 改空缺提醒時間\n"
-        f"設定提醒 關閉       — 關閉空缺提醒\n"
         f"設定靜音 23 7       — 改靜音時段\n"
         f"設定推播門檻 10     — 改活動觸發門檻\n"
         f"設定推播間隔 4      — 改定時間隔（小時）"
@@ -1246,44 +1188,7 @@ def cmd_set_interval(text):
     return f"✅ 定時推播間隔已更新為 {n} 小時。\n立即生效。"
 
 
-def cmd_set_reminder(text):
-    """設定提醒 HH:MM 或 設定提醒 關閉 — 修改空缺提醒時間"""
-    # 關閉
-    if re.match(r"設定提醒\s*(關閉|停用|off)$", text, re.IGNORECASE):
-        set_setting("reminder_enabled", "0")
-        if _scheduler:
-            try:
-                _scheduler.pause_job("vacancy_reminder")
-            except Exception:
-                pass
-        return "✅ 空缺提醒已關閉。\n輸入「設定提醒 12:00」可重新開啟。"
-
-    m = re.match(r"設定提醒\s+(\d{1,2})(?:[：:](\d{2}))?$", text)
-    if not m:
-        return "格式：設定提醒 HH:MM\n例：設定提醒 12:00\n或：設定提醒 關閉"
-
-    hour   = int(m.group(1))
-    minute = int(m.group(2)) if m.group(2) else 0
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        return "時間格式錯誤，小時 0–23，分鐘 0–59"
-
-    set_setting("reminder_hour",    hour)
-    set_setting("reminder_minute",  minute)
-    set_setting("reminder_enabled", "1")
-
-    if _scheduler:
-        try:
-            _scheduler.reschedule_job(
-                "vacancy_reminder",
-                trigger="cron", hour=hour, minute=minute,
-            )
-        except Exception as e:
-            logger.error(f"[設定] reminder reschedule 失敗: {e}")
-
-    return (
-        f"✅ 空缺提醒已設定為每天 {hour:02d}:{minute:02d}（台灣時間）\n"
-        f"只推播尚未額滿的項目。立即生效。"
-    )
+## cmd_set_reminder 已移除 — 空缺提醒功能已取消
 
 
 def cmd_clear_slot(group_id, user_id, text):
@@ -1736,9 +1641,6 @@ def handle_message(event):
     elif re.match(r"設定推播間隔\s+\d", text):
         reply = cmd_set_interval(text)
 
-    elif re.match(r"設定提醒(\s|$)", text):
-        reply = cmd_set_reminder(text)
-
     # ── 說明（只有負責人輸入「接龍說明」才顯示）
     elif text in ("接龍說明",):
         active = get_active_list(gid)
@@ -1783,11 +1685,6 @@ def handle_join(event):
 def start_scheduler():
     """啟動排程器"""
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI)
-    # 空缺提醒（預設 12:00）
-    scheduler.add_job(
-        vacancy_reminder, trigger="cron", hour=12, minute=0,
-        id="vacancy_reminder", replace_existing=True,
-    )
     # 每週日 20:00 推播下週工作預告
     scheduler.add_job(
         weekly_reminder, trigger="cron", day_of_week="sun", hour=20, minute=0,
@@ -1795,22 +1692,7 @@ def start_scheduler():
     )
 
     scheduler.start()
-    logger.info("[排程] 已啟動（空缺提醒 12:00 + 週日 20:00 週報）")
-
-    # 啟動後再讀 DB 設定，若與預設不同則更新
-    try:
-        r_hour    = int(get_setting("reminder_hour",    "12"))
-        r_minute  = int(get_setting("reminder_minute",  "0"))
-        r_enabled = get_setting("reminder_enabled", "1") == "1"
-        if not r_enabled:
-            scheduler.pause_job("vacancy_reminder")
-        elif (r_hour, r_minute) != (12, 0):
-            scheduler.reschedule_job(
-                "vacancy_reminder", trigger="cron", hour=r_hour, minute=r_minute,
-            )
-            logger.info(f"[排程] 更新空缺提醒為 {r_hour:02d}:{r_minute:02d}")
-    except Exception as e:
-        logger.warning(f"[排程] 讀取設定失敗（使用預設值）: {e}")
+    logger.info("[排程] 已啟動（週日 20:00 週報）")
 
     return scheduler
 
