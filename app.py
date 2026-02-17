@@ -1741,8 +1741,8 @@ def handle_message(event):
 
     # ── 說明（只有負責人輸入「接龍說明」才顯示）
     elif text in ("接龍說明",):
-        active = get_active_list(group_id)
-        if active and active[3] == user_id:
+        active = get_active_list(gid)
+        if active and active[3] == uid:
             reply = HELP_TEXT
         elif not active:
             reply = HELP_TEXT
