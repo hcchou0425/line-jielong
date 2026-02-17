@@ -49,7 +49,8 @@ HELP_TEXT = """📖 接龍指令說明
 退出：退出 編號
 列表：查看報名狀況
 空缺：查看缺人項目
-下週：查看下週工作預告
+明日工作提醒：明天的排班
+下周工作提醒：下週的排班
 
 【負責人】
 重新開團／結束接龍
@@ -632,6 +633,52 @@ def _parse_slot_date(date_str):
         return dt
     except Exception:
         return None
+
+
+def cmd_tomorrow_preview(group_id):
+    """手動觸發：明日工作提醒"""
+    active = get_active_list(group_id)
+    if not active or _list_type(active) != "schedule":
+        return "目前沒有進行中的排班接龍。"
+
+    tomorrow = datetime.now(TZ_TAIPEI).date() + timedelta(days=1)
+
+    list_id = active[0]
+    slots   = get_slots(list_id)
+    signups = get_slot_signups(list_id)
+
+    tomorrow_slots = []
+    for s in slots:
+        dt = _parse_slot_date(s[3])
+        if dt and dt == tomorrow:
+            tomorrow_slots.append(s)
+
+    if not tomorrow_slots:
+        return f"明天（{tomorrow.strftime('%m/%d')}）沒有排班項目。"
+
+    lines = [
+        f"📅 明日工作提醒（{tomorrow.strftime('%m/%d')}）",
+        f"📋 {active[2]}",
+        "─" * 16,
+    ]
+    for s in tomorrow_slots:
+        sn       = s[2]
+        required = s[8]
+        names    = signups.get(sn, [])
+        current  = len(names)
+        label    = f"【{sn}】{_slot_label(s)}"
+        if required > 1:
+            label += f"（{current}/{required}人）"
+
+        if names:
+            label += f"\n   👤 {'、'.join(names)}"
+        else:
+            label += "\n   ⚠️ 尚無人報名"
+
+        lines.append(label)
+
+    lines.append("─" * 16)
+    return "\n".join(lines)
 
 
 def cmd_weekly_preview(group_id):
@@ -1567,8 +1614,12 @@ def handle_message(event):
     elif text in ("空缺", "缺人", "未認領", "誰沒報"):
         reply = cmd_vacancy(gid)
 
-    # ── 下週預告（手動觸發）
-    elif text in ("下週", "下周", "下週工作", "下周工作", "下週預告"):
+    # ── 明日工作提醒（手動觸發）
+    elif text in ("明日工作提醒", "明天工作提醒", "明日工作", "明天工作"):
+        reply = cmd_tomorrow_preview(gid)
+
+    # ── 下周工作提醒（手動觸發）
+    elif text in ("下周工作提醒", "下週工作提醒", "下周工作", "下週工作"):
         reply = cmd_weekly_preview(gid)
 
     # ── 重新開團（負責人清除報名重來）
