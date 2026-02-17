@@ -41,6 +41,24 @@ TIME_RE      = re.compile(r'\d{1,2}:\d{2}(?:\s*[-–]\s*\d{1,2}:\d{2})?')
 SESSION_RE   = re.compile(r'^\s*(上午|下午)\s*[：:](.*)')
 PREFILL_RE   = re.compile(r'^\s*\d+[.．、]\s*(.+\S)')  # 「1. 小白」式預填
 
+# 統一的報名說明（給長輩看的，寫清楚一點）
+SIGNUP_GUIDE = (
+    "━━ 報名方式 ━━\n"
+    "輸入 + 編號 空格 你的名字\n"
+    "\n"
+    "範例：\n"
+    "  +3 王小明    → 報名第3項\n"
+    "  3. 王小明    → 同上\n"
+    "  +3 王小明 李小華 → 同項報多人\n"
+    "  +1 +3 +5 王小明  → 一次報多項\n"
+    "\n"
+    "其他指令：\n"
+    "  列表  → 查看目前報名狀況\n"
+    "  空缺  → 查看還缺人的工作\n"
+    "  退出 3 → 取消第3項報名\n"
+    "  說明  → 完整指令說明"
+)
+
 HELP_TEXT = """📖 接龍助理使用說明
 ─────────────────
 【工作認養排班模式】
@@ -687,7 +705,7 @@ def vacancy_reminder():
                 label += f"  （{current}/{required}人）"
             lines.append(label)
         lines.append("─" * 16)
-        lines.append("報名：+編號 姓名  或  編號. 姓名")
+        lines.append(SIGNUP_GUIDE)
 
         try:
             line_bot_api.push_message(lst[1], TextSendMessage(text="\n".join(lines)))
@@ -766,7 +784,7 @@ def weekly_reminder():
             lines.append(label)
 
         lines.append("─" * 16)
-        lines.append("報名：+編號 姓名  或  編號. 姓名")
+        lines.append(SIGNUP_GUIDE)
 
         try:
             line_bot_api.push_message(lst[1], TextSendMessage(text="\n".join(lines)))
@@ -877,7 +895,8 @@ def cmd_post_schedule(group_id, user_id, user_name, text):
         if sn in prefilled:
             label += f"  ✓ {'、'.join(prefilled[sn])}"
         lines.append(label)
-    lines.append("\n報名方式：\n+[編號] 你的名字\n例：+3 小明\n（或只輸入 +3，用LINE暱稱報名）")
+    lines.append("")
+    lines.append(SIGNUP_GUIDE)
     return "\n".join(lines)
 
 
@@ -927,7 +946,7 @@ def _join_slot(group_id, user_id, user_name, text, active):
 
     m = re.match(r"\+(\d+)\s*(.*)", text)
     if not m:
-        return "格式：+[編號] 你的名字\n例：+3 小明\n（輸入「列表」查看可報名項目）"
+        return "請輸入 + 編號 空格 你的名字\n\n例如：+3 王小明\n\n先輸入「列表」看有哪些工作可以報名"
 
     slot_num  = int(m.group(1))
     name_part = m.group(2).strip()
@@ -941,7 +960,7 @@ def _join_slot(group_id, user_id, user_name, text, active):
     slot = c.fetchone()
     if not slot:
         conn.close()
-        return f"找不到第 {slot_num} 號工作項目。\n輸入「列表」查看可報名的項目。"
+        return f"找不到第 {slot_num} 號工作項目。\n\n請先輸入「列表」查看有哪些工作可以報名。"
 
     required = slot[8]
 
@@ -973,7 +992,7 @@ def _join_slot(group_id, user_id, user_name, text, active):
         conn.commit()
         conn.close()
         _check_all_filled_notify(list_id, group_id, active)
-        return f"✅ 報名成功！\n【{slot_num}】{_slot_label(slot)} → {name}\n（輸入「列表」查看完整名單）"
+        return f"✅ 報名成功！\n【{slot_num}】{_slot_label(slot)} → {name}\n\n輸入「列表」可查看完整名單"
 
     # 多人報名
     results = []
@@ -1140,7 +1159,7 @@ def cmd_proxy_join(group_id, user_id, user_name, text):
     slot = c.fetchone()
     if not slot:
         conn.close()
-        return f"找不到第 {slot_num} 號工作項目。\n輸入「列表」查看可報名的項目。"
+        return f"找不到第 {slot_num} 號工作項目。\n\n請先輸入「列表」查看有哪些工作可以報名。"
 
     required = slot[8]
 
@@ -1411,7 +1430,7 @@ def cmd_vacancy(group_id):
         lines.append(label)
     lines.append("─" * 16)
     lines.append(f"共 {len(unfilled)} 項空缺")
-    lines.append("報名：+編號 姓名  或  編號. 姓名")
+    lines.append(SIGNUP_GUIDE)
     return "\n".join(lines)
 
 
@@ -1518,7 +1537,7 @@ def cmd_restart(group_id, user_id):
             label += f"（共{s[8]}人）"
         lines.append(label)
     lines.append("─" * 16)
-    lines.append("報名方式：+編號 姓名\n例：+3 小明")
+    lines.append(SIGNUP_GUIDE)
     return "\n".join(lines)
 
 
