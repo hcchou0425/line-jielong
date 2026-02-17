@@ -1684,7 +1684,11 @@ def handle_message(event):
 
     # ── 重新開團（負責人清除報名重來）
     elif text in ("重新開團", "重開", "/重新開團"):
-        reply = cmd_restart(gid, uid)
+        try:
+            reply = cmd_restart(gid, uid)
+        except Exception as e:
+            logger.error(f"[cmd_restart] 錯誤: {e}")
+            reply = "⚠️ 重新開團失敗，請稍後再試。"
 
     # ── 結束
     elif text in ("結束接龍", "結團", "/結束接龍", "/結團", "關閉接龍"):
@@ -1732,6 +1736,9 @@ def handle_message(event):
     logger.info(f"[msg] reply={'（無）' if reply is None else repr(reply[:40])}")
 
     if reply:
+        # LINE 文字訊息上限 5000 字
+        if len(reply) > 5000:
+            reply = reply[:4950] + "\n\n⋯（訊息過長已截斷，請輸入「列表」查看完整內容）"
         try:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         except Exception as e:
