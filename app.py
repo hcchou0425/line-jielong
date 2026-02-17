@@ -538,6 +538,23 @@ def format_list(list_row, entries, *, show_time=False):
 # 推播核心
 # ══════════════════════════════════════════
 
+def _is_all_filled(lst):
+    """判斷接龍是否所有工作都已認領完畢（不需要再推播）"""
+    if _list_type(lst) != "schedule":
+        return False  # 簡易接龍無法判斷，持續推播
+    slots   = get_slots(lst[0])
+    signups = get_slot_signups(lst[0])
+    for s in slots:
+        sn       = s[2]
+        required = s[8]
+        current  = len(signups.get(sn, []))
+        if _is_strict_slot(s) and current < required:
+            return False
+        if not _is_strict_slot(s) and current == 0:
+            return False
+    return True
+
+
 def _push_list(lst, prefix=""):
     """對單一接龍推播名單，成功後更新推播狀態"""
     group_id = lst[1]
@@ -571,6 +588,9 @@ def daily_broadcast():
     logger.info(f"[排程] 早安推播 {len(active_lists)} 個接龍")
     prefix = f"📣 早安！以下是今日工作認養名單（{now_str}）"
     for lst in active_lists:
+        if _is_all_filled(lst):
+            logger.info(f"[排程] 全部認領完畢，跳過推播：{lst[2]}")
+            continue
         _push_list(lst, prefix)
 
 
@@ -583,6 +603,8 @@ def check_timed_broadcast():
     now = datetime.now(TZ_TAIPEI)
 
     for lst in active_lists:
+        if _is_all_filled(lst):
+            continue
         last_at_str = lst[8]  # last_broadcast_at
         if last_at_str:
             try:
@@ -611,6 +633,8 @@ def check_activity_broadcast(list_id):
     lst = c.fetchone()
     conn.close()
     if not lst or lst[5] != "open":
+        return
+    if _is_all_filled(lst):
         return
 
     last_count    = lst[9] if lst[9] is not None else 0  # last_broadcast_count
