@@ -60,6 +60,7 @@ HELP_TEXT = """📖 接龍助理使用說明
 
 【負責人專用】
 重貼排班表               — 重建接龍（保留已報名）
+重新開團                 — 清除報名，重新開始
 移除 [編號] [姓名]       — 移除指定人員
 更改 [編號] [舊名] [新名] — 修改報名者姓名
 結束接龍                 — 封存最終名單
@@ -73,17 +74,12 @@ HELP_TEXT = """📖 接龍助理使用說明
 結束接龍     — 封存最終名單
 
 ─────────────────
-【推播設定（無需重新部署）】
-推播設定              — 查看目前設定
-設定推播 08:00        — 更改早安推播時間
+【提醒設定】
 設定提醒 12:00        — 更改空缺提醒時間
 設定提醒 關閉         — 關閉空缺提醒
-設定靜音 22 7         — 設定靜音時段（22:00–07:00）
-設定推播門檻 10       — 改活動觸發門檻
-設定推播間隔 4        — 改定時推播間隔（小時）
 
 ─────────────────
-📌 早安推播 + 6次報名觸發 + 每6小時定時（22:00–07:00靜音）
+📌 全部認領完畢時自動通知群組
 📅 每週日 20:00 自動推播下週工作預告"""
 
 
@@ -625,28 +621,29 @@ def check_timed_broadcast():
             _push_list(lst, "📋 定時更新")
 
 
-def check_activity_broadcast(list_id):
-    """報名後檢查：新增報名數 ≥ 6 且在允許時段，則立即推播"""
-    if not is_broadcast_allowed():
-        return
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT * FROM lists WHERE id=?", (list_id,))
-    lst = c.fetchone()
-    conn.close()
+def _check_all_filled_notify(list_id, group_id, lst=None):
+    """報名後檢查：全部認領完畢時推播通知"""
+    if lst is None:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT * FROM lists WHERE id=?", (list_id,))
+        lst = c.fetchone()
+        conn.close()
     if not lst or lst[5] != "open":
         return
-    if _is_all_filled(lst):
+    if not _is_all_filled(lst):
         return
 
-    last_count    = lst[9] if lst[9] is not None else 0  # last_broadcast_count
-    current_count = get_entry_count(list_id)
-    threshold     = int(get_setting("activity_threshold", "6"))
-
-    if (current_count - last_count) >= threshold:
-        logger.info(f"[排程] 活動觸發推播（新增 {current_count - last_count} 筆）：{lst[2]}")
-        _push_list(lst, "📢 名單更新")
+    logger.info(f"[通知] 全部認領完畢：{lst[2]}")
+    slots   = get_slots(list_id)
+    signups = get_slot_signups(list_id)
+    body    = format_schedule_list(lst, slots, signups, show_time=True)
+    total   = sum(len(v) for v in signups.values())
+    message = f"🎉 所有工作都已認領完畢！\n\n{body}\n\n共 {total} 人報名"
+    try:
+        line_bot_api.push_message(group_id, TextSendMessage(text=message))
+    except Exception as e:
+        logger.error(f"[通知] 推播失敗 {group_id}: {e}")
 
 
 def vacancy_reminder():
@@ -975,8 +972,8 @@ def _join_slot(group_id, user_id, user_name, text, active):
         )
         conn.commit()
         conn.close()
-        check_activity_broadcast(list_id)
-        return f"✅ 報名成功！\n{slot_num}. {_slot_label(slot)} → {name}\n（輸入「列表」查看完整名單）"
+        _check_all_filled_notify(list_id, group_id, active)
+        return f"✅ 報名成功！\n【{slot_num}】{_slot_label(slot)} → {name}\n（輸入「列表」查看完整名單）"
 
     # 多人報名
     results = []
@@ -1009,9 +1006,9 @@ def _join_slot(group_id, user_id, user_name, text, active):
     conn.commit()
     conn.close()
     if any_inserted:
-        check_activity_broadcast(list_id)
+        _check_all_filled_notify(list_id, group_id, active)
 
-    header = f"📋 {slot_num}. {_slot_label(slot)} 報名結果："
+    header = f"📋 【{slot_num}】{_slot_label(slot)} 報名結果："
     return header + "\n" + "\n".join(results)
 
 
@@ -1052,12 +1049,11 @@ def _join_simple(group_id, user_id, user_name, text, active):
 
     conn.commit()
     conn.close()
-    check_activity_broadcast(list_id)
-    return reply + "\n（名單每天 07:00 公布，或輸入「列表」隨時查看）"
+    return reply + "\n（輸入「列表」隨時查看）"
 
 
 def cmd_join_multi(group_id, user_id, user_name, text):
-    """多項報名：+1 +3 +5 姓名 — 一次報名多個工作"""
+    """多項報名：+1 +3 +5 小明 小華 — 多人一次報名多個工作"""
     active = get_active_list(group_id)
     if not active:
         return "目前沒有進行中的接龍。"
@@ -1066,7 +1062,7 @@ def cmd_join_multi(group_id, user_id, user_name, text):
 
     slot_nums = [int(x) for x in re.findall(r'\+(\d+)', text)]
     name_part = re.sub(r'\+\d+', '', text).strip()
-    name = name_part or user_name or "（未知）"
+    names = name_part.split() if name_part else [user_name or "（未知）"]
 
     list_id = active[0]
     conn = sqlite3.connect(DB_PATH)
@@ -1075,50 +1071,50 @@ def cmd_join_multi(group_id, user_id, user_name, text):
     results = []
     any_inserted = False
 
-    for slot_num in slot_nums:
-        c.execute("SELECT * FROM slots WHERE list_id=? AND slot_num=?", (list_id, slot_num))
-        slot = c.fetchone()
-        if not slot:
-            results.append(f"❌ 第 {slot_num} 號項目不存在")
-            continue
-
-        required = slot[8]
-
-        # 同一姓名重複報名 → 更新（防止重複，允許同一人幫多人報名）
-        c.execute(
-            "SELECT id FROM entries WHERE list_id=? AND user_name=? AND slot_num=?",
-            (list_id, name, slot_num),
-        )
-        existing = c.fetchone()
-        if existing:
-            c.execute("UPDATE entries SET user_name=? WHERE id=?", (name, existing[0]))
-            results.append(f"✏️ {slot_num}. {_slot_label(slot)}（更新）")
-            continue
-
-        # 額滿檢查（僅值班類工作限額）
-        if _is_strict_slot(slot):
-            c.execute(
-                "SELECT COUNT(*) FROM entries WHERE list_id=? AND slot_num=?",
-                (list_id, slot_num),
-            )
-            if c.fetchone()[0] >= required:
-                results.append(f"❌ 第 {slot_num} 號已額滿（{required}人）")
+    for name in names:
+        for slot_num in slot_nums:
+            c.execute("SELECT * FROM slots WHERE list_id=? AND slot_num=?", (list_id, slot_num))
+            slot = c.fetchone()
+            if not slot:
+                results.append(f"❌ {name}：第 {slot_num} 號不存在")
                 continue
 
-        c.execute(
-            "INSERT INTO entries (list_id, user_id, user_name, slot_num, seq) VALUES (?, ?, ?, ?, ?)",
-            (list_id, user_id, name, slot_num, slot_num),
-        )
-        results.append(f"✅ {slot_num}. {_slot_label(slot)}")
-        any_inserted = True
+            required = slot[8]
+
+            # 同一姓名重複報名 → 跳過
+            c.execute(
+                "SELECT id FROM entries WHERE list_id=? AND user_name=? AND slot_num=?",
+                (list_id, name, slot_num),
+            )
+            if c.fetchone():
+                results.append(f"⚠️ {name}：【{slot_num}】已報名")
+                continue
+
+            # 額滿檢查（僅值班類工作限額）
+            if _is_strict_slot(slot):
+                c.execute(
+                    "SELECT COUNT(*) FROM entries WHERE list_id=? AND slot_num=?",
+                    (list_id, slot_num),
+                )
+                if c.fetchone()[0] >= required:
+                    results.append(f"❌ {name}：【{slot_num}】已額滿（{required}人）")
+                    continue
+
+            c.execute(
+                "INSERT INTO entries (list_id, user_id, user_name, slot_num, seq) VALUES (?, ?, ?, ?, ?)",
+                (list_id, user_id, name, slot_num, slot_num),
+            )
+            results.append(f"✅ {name}：【{slot_num}】{_slot_label(slot)}")
+            any_inserted = True
 
     conn.commit()
     conn.close()
 
     if any_inserted:
-        check_activity_broadcast(list_id)
+        _check_all_filled_notify(list_id, group_id, active)
 
-    return f"📋 {name} 報名結果：\n" + "\n".join(results)
+    name_display = "、".join(names)
+    return f"📋 {name_display} 報名結果：\n" + "\n".join(results)
 
 
 def cmd_proxy_join(group_id, user_id, user_name, text):
@@ -1173,9 +1169,9 @@ def cmd_proxy_join(group_id, user_id, user_name, text):
     )
     conn.commit()
     conn.close()
-    check_activity_broadcast(list_id)
+    _check_all_filled_notify(list_id, group_id)
     operator = user_name or "代報者"
-    return f"✅ 已代替 {name} 報名！\n{slot_num}. {_slot_label(slot)} → {name}\n（由 {operator} 代報）"
+    return f"✅ 已代替 {name} 報名！\n【{slot_num}】{_slot_label(slot)} → {name}\n（由 {operator} 代報）"
 
 
 def cmd_show_settings():
@@ -1467,6 +1463,65 @@ def cmd_close(group_id, user_id):
         return f"🔒 接龍已結束，以下為最終名單：\n\n{body}\n\n共 {len(entries)} 人報名"
 
 
+def cmd_restart(group_id, user_id):
+    """重新開團 — 負責人結束目前接龍，用相同排班表重新開團（清除所有報名）"""
+    active = get_active_list(group_id)
+    if not active:
+        return "目前沒有進行中的接龍。"
+
+    if active[3] != user_id:
+        creator_name = active[4] or "負責人"
+        return f"⚠️ 只有負責人（{creator_name}）才能重新開團。"
+
+    if _list_type(active) != "schedule":
+        return "此功能僅適用於排班模式的接龍。"
+
+    old_list_id = active[0]
+    title       = active[2]
+    creator_id  = active[3]
+    creator_name = active[4]
+
+    # 讀取舊的 slots
+    old_slots = get_slots(old_list_id)
+    if not old_slots:
+        return "找不到排班資料，無法重新開團。"
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    # 關閉舊的
+    c.execute('UPDATE lists SET status="closed" WHERE id=?', (old_list_id,))
+
+    # 建立新的（相同排班，不帶報名）
+    c.execute(
+        "INSERT INTO lists (group_id, title, creator_id, creator_name, list_type, last_broadcast_at, last_broadcast_count)"
+        " VALUES (?, ?, ?, ?, 'schedule', CURRENT_TIMESTAMP, 0)",
+        (group_id, title, creator_id, creator_name),
+    )
+    new_list_id = c.lastrowid
+
+    for s in old_slots:
+        c.execute(
+            "INSERT INTO slots (list_id,slot_num,date_str,day_str,activity,time_str,session,required_count,note)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (new_list_id, s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9]),
+        )
+
+    conn.commit()
+    conn.close()
+
+    lines = [f"🔄 已重新開團！\n📋 {title}\n共 {len(old_slots)} 個工作項目（報名已清除）", "─" * 16]
+    for s in old_slots:
+        sn = s[2]
+        label = f"【{sn}】{_slot_label(s)}"
+        if s[8] > 1:
+            label += f"（共{s[8]}人）"
+        lines.append(label)
+    lines.append("─" * 16)
+    lines.append("報名方式：+編號 姓名\n例：+3 小明")
+    return "\n".join(lines)
+
+
 def cmd_leave(group_id, user_id, text=""):
     active = get_active_list(group_id)
     if not active:
@@ -1608,6 +1663,10 @@ def handle_message(event):
     elif text in ("空缺", "缺人", "未認領", "誰沒報"):
         reply = cmd_vacancy(gid)
 
+    # ── 重新開團（負責人清除報名重來）
+    elif text in ("重新開團", "重開", "/重新開團"):
+        reply = cmd_restart(gid, uid)
+
     # ── 結束
     elif text in ("結束接龍", "結團", "/結束接龍", "/結團", "關閉接龍"):
         reply = cmd_close(gid, uid)
@@ -1682,17 +1741,8 @@ def handle_join(event):
 # ══════════════════════════════════════════
 
 def start_scheduler():
-    """啟動排程器（先用預設值，再從 DB 更新時間）"""
+    """啟動排程器"""
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI)
-    # 先以預設值 07:00 啟動，避免啟動時查 DB 造成阻塞
-    scheduler.add_job(
-        daily_broadcast, trigger="cron", hour=7, minute=0,
-        id="daily_broadcast", replace_existing=True,
-    )
-    scheduler.add_job(
-        check_timed_broadcast, trigger="cron", minute=5,
-        id="timed_broadcast", replace_existing=True,
-    )
     # 空缺提醒（預設 12:00）
     scheduler.add_job(
         vacancy_reminder, trigger="cron", hour=12, minute=0,
@@ -1705,18 +1755,10 @@ def start_scheduler():
     )
 
     scheduler.start()
-    logger.info("[排程] 已啟動（早安 07:00 + 提醒 12:00 + 週日 20:00 週報 + 每小時定時檢查）")
+    logger.info("[排程] 已啟動（空缺提醒 12:00 + 週日 20:00 週報）")
 
     # 啟動後再讀 DB 設定，若與預設不同則更新
     try:
-        hour   = int(get_setting("broadcast_hour",   "7"))
-        minute = int(get_setting("broadcast_minute", "0"))
-        if (hour, minute) != (7, 0):
-            scheduler.reschedule_job(
-                "daily_broadcast", trigger="cron", hour=hour, minute=minute,
-            )
-            logger.info(f"[排程] 更新早安推播為 {hour:02d}:{minute:02d}")
-
         r_hour    = int(get_setting("reminder_hour",    "12"))
         r_minute  = int(get_setting("reminder_minute",  "0"))
         r_enabled = get_setting("reminder_enabled", "1") == "1"
