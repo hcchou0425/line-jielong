@@ -79,6 +79,7 @@ HELP_TEXT = """📖 接龍助理使用說明
 【負責人專用】
 重貼排班表               — 重建接龍（保留已報名）
 重新開團                 — 清除報名，重新開始
+清除 [編號]              — 清空某項目所有報名
 移除 [編號] [姓名]       — 移除指定人員
 更改 [編號] [舊名] [新名] — 修改報名者姓名
 結束接龍                 — 封存最終名單
@@ -1330,6 +1331,51 @@ def cmd_set_reminder(text):
     )
 
 
+def cmd_clear_slot(group_id, user_id, text):
+    """清除 [編號] — 負責人清除某項目的所有報名"""
+    active = get_active_list(group_id)
+    if not active:
+        return "目前沒有進行中的接龍。"
+    if active[3] != user_id:
+        creator_name = active[4] or "負責人"
+        return f"⚠️ 只有負責人（{creator_name}）才能清除項目。"
+    if _list_type(active) != "schedule":
+        return "此功能僅適用於排班模式。"
+
+    m = re.match(r"清除\s+(\d+)", text)
+    slot_num = int(m.group(1))
+    list_id  = active[0]
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    c.execute("SELECT * FROM slots WHERE list_id=? AND slot_num=?", (list_id, slot_num))
+    slot = c.fetchone()
+    if not slot:
+        conn.close()
+        return f"找不到第 {slot_num} 號工作項目。"
+
+    c.execute(
+        "SELECT user_name FROM entries WHERE list_id=? AND slot_num=?",
+        (list_id, slot_num),
+    )
+    names = [r[0] for r in c.fetchall()]
+
+    if not names:
+        conn.close()
+        return f"【{slot_num}】{_slot_label(slot)} 目前沒有人報名。"
+
+    c.execute("DELETE FROM entries WHERE list_id=? AND slot_num=?", (list_id, slot_num))
+    conn.commit()
+    conn.close()
+
+    return (
+        f"🗑️ 已清除【{slot_num}】{_slot_label(slot)} 的所有報名\n"
+        f"移除 {len(names)} 人：{'、'.join(names)}\n\n"
+        f"現在可以重新報名此項目。"
+    )
+
+
 def cmd_admin_remove(group_id, user_id, text):
     """移除 [編號] [姓名] — 開團者移除指定人員"""
     active = get_active_list(group_id)
@@ -1541,7 +1587,7 @@ def cmd_restart(group_id, user_id):
     return "\n".join(lines)
 
 
-def cmd_leave(group_id, user_id, text=""):
+def cmd_leave(group_id, user_id, user_name, text=""):
     active = get_active_list(group_id)
     if not active:
         return "目前沒有進行中的接龍。"
@@ -1552,17 +1598,15 @@ def cmd_leave(group_id, user_id, text=""):
     slot_match = re.match(r"(?:退出|取消)\s+(\d+)\s*(.*)", text)
     if _list_type(active) == "schedule" and slot_match:
         slot_num = int(slot_match.group(1))
-        name     = slot_match.group(2).strip()
+        name     = slot_match.group(2).strip() or user_name
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        if name:
-            # 指定姓名取消（幫別人取消）
-            c.execute(
-                "DELETE FROM entries WHERE list_id=? AND slot_num=? AND user_name=?",
-                (list_id, slot_num, name),
-            )
-        else:
-            # 取消自己的報名
+        # 先用姓名找，找不到再用 user_id
+        c.execute(
+            "DELETE FROM entries WHERE list_id=? AND slot_num=? AND user_name=?",
+            (list_id, slot_num, name),
+        )
+        if c.rowcount == 0:
             c.execute(
                 "DELETE FROM entries WHERE list_id=? AND user_id=? AND slot_num=?",
                 (list_id, user_id, slot_num),
@@ -1571,27 +1615,36 @@ def cmd_leave(group_id, user_id, text=""):
         conn.commit()
         conn.close()
         if affected:
-            who = name or "你"
-            return f"✅ 已取消 {who} 在第 {slot_num} 號工作的報名。"
+            return f"✅ 已取消 {name} 在第 {slot_num} 號工作的報名。"
         else:
-            return f"找不到{name or '你'}在第 {slot_num} 號的報名紀錄。"
+            return f"找不到 {name} 在第 {slot_num} 號的報名紀錄。"
 
-    # 預設：移除該用戶所有報名
+    # 預設：移除該用戶所有報名（用 user_name 或 user_id）
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     if _list_type(active) == "schedule":
+        # 用姓名找
         c.execute(
-            "SELECT DISTINCT slot_num FROM entries WHERE list_id=? AND user_id=?",
-            (list_id, user_id),
+            "SELECT DISTINCT slot_num FROM entries WHERE list_id=? AND user_name=?",
+            (list_id, user_name),
         )
         slot_nums = [r[0] for r in c.fetchall()]
-        if not slot_nums:
-            conn.close()
-            return "你目前沒有報名任何工作項目。"
-        c.execute("DELETE FROM entries WHERE list_id=? AND user_id=?", (list_id, user_id))
+        if slot_nums:
+            c.execute("DELETE FROM entries WHERE list_id=? AND user_name=?", (list_id, user_name))
+        else:
+            # fallback 用 user_id
+            c.execute(
+                "SELECT DISTINCT slot_num FROM entries WHERE list_id=? AND user_id=?",
+                (list_id, user_id),
+            )
+            slot_nums = [r[0] for r in c.fetchall()]
+            if slot_nums:
+                c.execute("DELETE FROM entries WHERE list_id=? AND user_id=?", (list_id, user_id))
         conn.commit()
         conn.close()
-        return f"✅ 已取消你在第 {', '.join(str(s) for s in slot_nums)} 號的報名。"
+        if not slot_nums:
+            return "找不到你的報名紀錄。"
+        return f"✅ 已取消 {user_name} 在第 {', '.join(str(s) for s in slot_nums)} 號的報名。"
     else:
         c.execute("SELECT id, seq FROM entries WHERE list_id=? AND user_id=?", (list_id, user_id))
         existing = c.fetchone()
@@ -1696,7 +1749,11 @@ def handle_message(event):
 
     # ── 退出（支援「退出 3」或「退出 3 小明」取消特定項目）
     elif re.match(r"(退出|取消)(\s+\d+.*)?$", text):
-        reply = cmd_leave(gid, uid, text)
+        reply = cmd_leave(gid, uid, lazy_name(), text)
+
+    # ── 負責人清除整個項目（清除 3）
+    elif re.match(r"清除\s+\d+$", text):
+        reply = cmd_clear_slot(gid, uid, text)
 
     # ── 幫報（代替他人報名）
     elif re.match(r"幫報\s+\d+\s+\S", text):
