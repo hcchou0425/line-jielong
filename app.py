@@ -17,7 +17,6 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, JoinEvent
-from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -50,6 +49,7 @@ HELP_TEXT = """📖 接龍指令說明
 退出：退出 編號
 列表：查看報名狀況
 空缺：查看缺人項目
+下週：查看下週工作預告
 
 【負責人】
 重新開團／結束接龍
@@ -634,69 +634,55 @@ def _parse_slot_date(date_str):
         return None
 
 
-def weekly_reminder():
-    """每週日推播：下週的工作排班總覽"""
-    active_lists = get_all_active_lists()
-    if not active_lists:
-        return
+def cmd_weekly_preview(group_id):
+    """手動觸發：下週工作預告"""
+    active = get_active_list(group_id)
+    if not active or _list_type(active) != "schedule":
+        return "目前沒有進行中的排班接龍。"
 
     now = datetime.now(TZ_TAIPEI).date()
-    # 計算下週一到下週日
     days_until_monday = (7 - now.weekday()) % 7
     if days_until_monday == 0:
-        days_until_monday = 1  # 今天是週日，下週一是明天
+        days_until_monday = 1
     next_monday = now + timedelta(days=days_until_monday)
     next_sunday = next_monday + timedelta(days=6)
 
-    logger.info(f"[週報] 下週範圍: {next_monday} ~ {next_sunday}")
+    list_id = active[0]
+    slots   = get_slots(list_id)
+    signups = get_slot_signups(list_id)
 
-    for lst in active_lists:
-        if _list_type(lst) != "schedule":
-            continue
+    next_week_slots = []
+    for s in slots:
+        dt = _parse_slot_date(s[3])
+        if dt and next_monday <= dt <= next_sunday:
+            next_week_slots.append(s)
 
-        list_id = lst[0]
-        slots   = get_slots(list_id)
-        signups = get_slot_signups(list_id)
+    if not next_week_slots:
+        return f"下週（{next_monday.strftime('%m/%d')}–{next_sunday.strftime('%m/%d')}）沒有排班項目。"
 
-        # 篩選下週的工作項目
-        next_week_slots = []
-        for s in slots:
-            dt = _parse_slot_date(s[3])
-            if dt and next_monday <= dt <= next_sunday:
-                next_week_slots.append(s)
+    lines = [
+        f"📅 下週工作預告（{next_monday.strftime('%m/%d')}–{next_sunday.strftime('%m/%d')}）",
+        f"📋 {active[2]}",
+        "─" * 16,
+    ]
+    for s in next_week_slots:
+        sn       = s[2]
+        required = s[8]
+        names    = signups.get(sn, [])
+        current  = len(names)
+        label    = f"【{sn}】{_slot_label(s)}"
+        if required > 1:
+            label += f"（{current}/{required}人）"
 
-        if not next_week_slots:
-            continue
+        if names:
+            label += f"\n   👤 {'、'.join(names)}"
+        else:
+            label += "\n   ⚠️ 尚無人報名"
 
-        lines = [
-            f"📅 下週工作預告（{next_monday.strftime('%m/%d')}–{next_sunday.strftime('%m/%d')}）",
-            f"📋 {lst[2]}",
-            "─" * 16,
-        ]
-        for s in next_week_slots:
-            sn       = s[2]
-            required = s[8]
-            names    = signups.get(sn, [])
-            current  = len(names)
-            label    = f"【{sn}】{_slot_label(s)}"
-            if required > 1:
-                label += f"（{current}/{required}人）"
+        lines.append(label)
 
-            if names:
-                label += f"\n   👤 {'、'.join(names)}"
-            else:
-                label += "\n   ⚠️ 尚無人報名"
-
-            lines.append(label)
-
-        lines.append("─" * 16)
-        # (說明已移至「接龍說明」指令)
-
-        try:
-            line_bot_api.push_message(lst[1], TextSendMessage(text="\n".join(lines)))
-            logger.info(f"[週報] 已推播至 {lst[1]}：{len(next_week_slots)} 項")
-        except Exception as e:
-            logger.error(f"[週報] 推播失敗 {lst[1]}: {e}")
+    lines.append("─" * 16)
+    return "\n".join(lines)
 
 
 # ══════════════════════════════════════════
@@ -1135,18 +1121,7 @@ def cmd_set_broadcast_time(text):
     set_setting("broadcast_hour",   hour)
     set_setting("broadcast_minute", minute)
 
-    # 即時更新 scheduler
-    if _scheduler:
-        try:
-            _scheduler.reschedule_job(
-                "daily_broadcast",
-                trigger="cron", hour=hour, minute=minute,
-            )
-            logger.info(f"[設定] 早安推播已更新為 {hour:02d}:{minute:02d}")
-        except Exception as e:
-            logger.error(f"[設定] reschedule 失敗: {e}")
-
-    return f"✅ 早安推播已更新為 每天 {hour:02d}:{minute:02d}（台灣時間）\n無需重新部署，立即生效。"
+    return f"✅ 設定已儲存：{hour:02d}:{minute:02d}（台灣時間）"
 
 
 def cmd_set_quiet(text):
@@ -1523,7 +1498,6 @@ def cmd_leave(group_id, user_id, user_name, text=""):
 def health():
     return str({
         "status":    "ok",
-        "scheduler": _scheduler_started,
         "token_set": bool(LINE_CHANNEL_ACCESS_TOKEN),
         "secret_set": bool(LINE_CHANNEL_SECRET),
     }), 200
@@ -1592,6 +1566,10 @@ def handle_message(event):
     # ── 查看空缺
     elif text in ("空缺", "缺人", "未認領", "誰沒報"):
         reply = cmd_vacancy(gid)
+
+    # ── 下週預告（手動觸發）
+    elif text in ("下週", "下周", "下週工作", "下周工作", "下週預告"):
+        reply = cmd_weekly_preview(gid)
 
     # ── 重新開團（負責人清除報名重來）
     elif text in ("重新開團", "重開", "/重新開團"):
@@ -1682,56 +1660,27 @@ def handle_join(event):
 # 排程器
 # ══════════════════════════════════════════
 
-def start_scheduler():
-    """啟動排程器"""
-    scheduler = BackgroundScheduler(timezone=TZ_TAIPEI)
-    # 每週日 20:00 推播下週工作預告
-    scheduler.add_job(
-        weekly_reminder, trigger="cron", day_of_week="sun", hour=20, minute=0,
-        id="weekly_reminder", replace_existing=True,
-    )
-
-    scheduler.start()
-    logger.info("[排程] 已啟動（週日 20:00 週報）")
-
-    return scheduler
+## start_scheduler 已移除 — 所有推播改為手動觸發
 
 
-def _start_scheduler_once():
-    """安全地啟動一次排程器（可從 gunicorn post_worker_init 或直接執行呼叫）"""
-    global _scheduler_started, _scheduler
-    with _startup_lock:
-        if not _scheduler_started:
-            try:
-                _scheduler = start_scheduler()
-                _scheduler_started = True
-            except Exception as e:
-                logger.error(f"[startup] 排程器啟動失敗: {e}")
+## _start_scheduler_once 已移除 — 不再需要排程器
 
 
 # ══════════════════════════════════════════
 # 啟動初始化（模組層級）
 # ══════════════════════════════════════════
 
-_startup_lock      = threading.Lock()
-_scheduler_started = False
-_scheduler         = None   # 全域 scheduler，供動態調整使用
-
-
 def _startup():
-    """模組載入時：在背景執行緒初始化 DB 並延遲啟動排程器（避免阻塞 port 綁定）"""
+    """模組載入時：在背景執行緒初始化 DB（避免阻塞 port 綁定）"""
 
     def _delayed_init():
         import time
-        # 先初始化 DB
+        time.sleep(3)
         try:
             init_db()
             logger.info("[startup] 資料庫初始化完成")
         except Exception as e:
             logger.error(f"[startup] 資料庫初始化失敗: {e}")
-        # 等 gunicorn 完成 port 綁定後再啟動排程器
-        time.sleep(3)
-        _start_scheduler_once()
 
     t = threading.Thread(target=_delayed_init, daemon=True)
     t.start()
