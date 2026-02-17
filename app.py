@@ -57,11 +57,12 @@ HELP_TEXT = """📖 接龍助理使用說明
 退出 [編號] [姓名]   — 取消指定人的報名
 列表              — 查看目前報名狀況
 空缺              — 列出尚未認領的工作
-結束接龍          — 封存最終名單
 
-【開團者專用】
+【負責人專用】
+重貼排班表               — 重建接龍（保留已報名）
 移除 [編號] [姓名]       — 移除指定人員
 更改 [編號] [舊名] [新名] — 修改報名者姓名
+結束接龍                 — 封存最終名單
 
 ─────────────────
 【簡易接龍模式】
@@ -782,7 +783,13 @@ def weekly_reminder():
 # ══════════════════════════════════════════
 
 def cmd_post_schedule(group_id, user_id, user_name, text):
-    """解析排班表並建立排班型接龍"""
+    """解析排班表並建立排班型接龍（有進行中的接龍時，僅負責人可重建）"""
+    # 檢查是否有進行中的接龍
+    existing = get_active_list(group_id)
+    if existing and existing[3] != user_id:
+        creator_name = existing[4] or "負責人"
+        return f"⚠️ 目前已有進行中的接龍「{existing[2]}」\n只有負責人（{creator_name}）可以重建排班表。"
+
     slots, prefilled = parse_schedule_slots(text)
     if not slots:
         return "找不到日期資料，無法建立排班表。請確認格式如：3/1（日）活動名稱"
@@ -791,6 +798,19 @@ def cmd_post_schedule(group_id, user_id, user_name, text):
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+
+    # 讀取舊的報名資料（用於重建時保留）
+    old_signups = {}  # {slot_num: [(user_id, user_name, registered_by), ...]}
+    carried_count = 0
+    if existing and _list_type(existing) == "schedule":
+        old_list_id = existing[0]
+        c.execute(
+            "SELECT slot_num, user_id, user_name, registered_by FROM entries WHERE list_id=? AND slot_num IS NOT NULL",
+            (old_list_id,),
+        )
+        for row in c.fetchall():
+            old_signups.setdefault(row[0], []).append((row[1], row[2], row[3]))
+
     c.execute('UPDATE lists SET status="closed" WHERE group_id=? AND status="open"', (group_id,))
     c.execute(
         "INSERT INTO lists (group_id, title, creator_id, creator_name, list_type, last_broadcast_at, last_broadcast_count)"
@@ -799,7 +819,9 @@ def cmd_post_schedule(group_id, user_id, user_name, text):
     )
     list_id = c.lastrowid
 
+    new_slot_nums = set()
     for s in slots:
+        new_slot_nums.add(s["slot_num"])
         c.execute(
             "INSERT INTO slots (list_id,slot_num,date_str,day_str,activity,time_str,session,required_count,note)"
             " VALUES (?,?,?,?,?,?,?,?,?)",
@@ -817,13 +839,37 @@ def cmd_post_schedule(group_id, user_id, user_name, text):
                 (list_id, proxy_uid, name, sn, sn),
             )
 
+    # 保留舊報名（同編號的項目，且不是預填的重複姓名）
+    for sn, entries in old_signups.items():
+        if sn not in new_slot_nums:
+            continue
+        for uid, uname, reg_by in entries:
+            # 避免與新預填資料重複
+            c.execute(
+                "SELECT id FROM entries WHERE list_id=? AND user_name=? AND slot_num=?",
+                (list_id, uname, sn),
+            )
+            if c.fetchone():
+                continue
+            c.execute(
+                "INSERT INTO entries (list_id, user_id, user_name, slot_num, seq, registered_by)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (list_id, uid, uname, sn, sn, reg_by),
+            )
+            carried_count += 1
+
     conn.commit()
     conn.close()
 
-    lines = [f"✅ 排班表已建立！\n📋 {title}\n共 {len(slots)} 個工作項目\n─────────────────"]
+    is_rebuild = bool(old_signups)
+    header = "🔄 排班表已重建！" if is_rebuild else "✅ 排班表已建立！"
+    lines = [f"{header}\n📋 {title}\n共 {len(slots)} 個工作項目"]
+    if carried_count > 0:
+        lines.append(f"📌 已保留 {carried_count} 筆報名紀錄")
+    lines.append("─────────────────")
     for s in slots:
         sn    = s["slot_num"]
-        label = f"{sn}. {s['date_str']}（{s['day_str']}）{s['activity']}"
+        label = f"【{sn}】{s['date_str']}（{s['day_str']}）{s['activity']}"
         if s["session"]:
             label += f" {s['session']}"
         if s["time_str"]:
