@@ -500,10 +500,11 @@ def format_schedule_list(list_row, slots, signups, *, show_time=False):
         slot_num = s[2]
         required = s[8]
         header   = f"【{slot_num}】{_slot_label(s)}"
-        if _is_strict_slot(s) and required > 1:
-            header += f"（共{required}人）"
-        lines.append(header)
         names = signups.get(slot_num, [])
+        current = len(names)
+        if required > 1:
+            header += f"（{current}/{required}人）"
+        lines.append(header)
         lines.append("   👤 " + ("、".join(names) if names else "（尚無人報名）"))
 
     return "\n".join(lines)
@@ -684,9 +685,9 @@ def vacancy_reminder():
         lines = [f"📢 {lst[2]}", "以下項目尚有空缺，歡迎認養！", "─" * 16]
         for s, current, required in unfilled:
             sn    = s[2]
-            label = f"{sn}. {_slot_label(s)}"
-            if _is_strict_slot(s) and required > 1:
-                label += f"  （已{current}/{required}人）"
+            label = f"【{sn}】{_slot_label(s)}"
+            if required > 1:
+                label += f"  （{current}/{required}人）"
             lines.append(label)
         lines.append("─" * 16)
         lines.append("報名：+編號 姓名  或  編號. 姓名")
@@ -756,15 +757,14 @@ def weekly_reminder():
             required = s[8]
             names    = signups.get(sn, [])
             current  = len(names)
-            label    = f"{sn}. {_slot_label(s)}"
+            label    = f"【{sn}】{_slot_label(s)}"
+            if required > 1:
+                label += f"（{current}/{required}人）"
 
             if names:
                 label += f"\n   👤 {'、'.join(names)}"
             else:
                 label += "\n   ⚠️ 尚無人報名"
-
-            if _is_strict_slot(s) and current < required:
-                label += f"（缺{required - current}人）"
 
             lines.append(label)
 
@@ -1409,9 +1409,9 @@ def cmd_vacancy(group_id):
     lines = [f"📋 {active[2]}", "以下項目尚未認領，歡迎報名！", "─" * 16]
     for s, current, required in unfilled:
         sn    = s[2]
-        label = f"{sn}. {_slot_label(s)}"
-        if _is_strict_slot(s) and required > 1:
-            label += f"  （已{current}/{required}人）"
+        label = f"【{sn}】{_slot_label(s)}"
+        if required > 1:
+            label += f"  （{current}/{required}人）"
         lines.append(label)
     lines.append("─" * 16)
     lines.append(f"共 {len(unfilled)} 項空缺")
