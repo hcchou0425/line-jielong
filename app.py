@@ -1409,6 +1409,29 @@ def cmd_close(group_id, user_id):
         return f"🔒 接龍已結束，以下為最終名單：\n\n{body}\n\n共 {len(entries)} 人報名"
 
 
+def cmd_cancel(group_id, user_id):
+    """取消接龍 — 負責人刪除此接龍的所有資料"""
+    active = get_active_list(group_id)
+    if not active:
+        return "目前沒有進行中的接龍。"
+
+    if active[3] != user_id:
+        creator_name = active[4] or "負責人"
+        return f"⚠️ 只有負責人（{creator_name}）才能取消接龍。"
+
+    list_id = active[0]
+    title   = active[2]
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM entries WHERE list_id=?", (list_id,))
+    c.execute("DELETE FROM slots WHERE list_id=?", (list_id,))
+    c.execute("DELETE FROM lists WHERE id=?", (list_id,))
+    conn.commit()
+    conn.close()
+
+    return f"🗑️ 接龍「{title}」已取消，所有資料已清除。"
+
+
 def cmd_restart(group_id, user_id):
     """重新開團 — 負責人結束目前接龍，用相同排班表重新開團（清除所有報名）"""
     active = get_active_list(group_id)
@@ -1633,6 +1656,10 @@ def handle_message(event):
     # ── 結束
     elif text in ("結束接龍", "結團", "/結束接龍", "/結團", "關閉接龍"):
         reply = cmd_close(gid, uid)
+
+    # ── 取消接龍（刪除所有資料，負責人專用）
+    elif text in ("取消接龍", "/取消接龍"):
+        reply = cmd_cancel(gid, uid)
 
     # ── 退出（支援「退出 3」或「退出 3 小明」取消特定項目）
     elif re.match(r"(退出|取消)(\s+\d+.*)?$", text):
