@@ -292,8 +292,8 @@ def normalize(text):
 # ══════════════════════════════════════════
 
 def is_schedule_post(text):
-    """含有至少 2 個日期行（3/1（日）格式）視為排班表"""
-    return len(DATE_RE.findall(text)) >= 2
+    """含有至少 1 個日期行（3/1（日）格式）視為排班表"""
+    return len(DATE_RE.findall(text)) >= 1
 
 
 _TITLE_SKIP = re.compile(r'^[/]?(?:接龍|開團)\s*$|^親愛的|^大家好|^平安|^各位|^Hello|^嗨')
