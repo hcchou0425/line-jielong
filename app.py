@@ -181,6 +181,18 @@ def get_active_list(group_id):
     conn.close()
     return row  # cols: id,group_id,title,creator_id,creator_name,status,created_at,list_type
 
+def get_all_schedules(group_id):
+    """取得該群組所有排班型接龍（不限 open/closed），供工作提醒使用"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        'SELECT * FROM lists WHERE group_id=? AND list_type="schedule" ORDER BY id DESC',
+        (group_id,),
+    )
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
 def _list_type(active):
     return active[7] if active and len(active) > 7 else "simple"
 
@@ -646,32 +658,32 @@ def _parse_slot_date(date_str):
 
 
 def cmd_tomorrow_preview(group_id):
-    """手動觸發：明日工作提醒"""
-    active = get_active_list(group_id)
-    if not active or _list_type(active) != "schedule":
-        return "目前沒有進行中的排班接龍。"
+    """手動觸發：明日工作提醒（搜尋所有排班表）"""
+    schedules = get_all_schedules(group_id)
+    if not schedules:
+        return "目前沒有排班接龍。"
 
     tomorrow = datetime.now(TZ_TAIPEI).date() + timedelta(days=1)
 
-    list_id = active[0]
-    slots   = get_slots(list_id)
-    signups = get_slot_signups(list_id)
-
-    tomorrow_slots = []
-    for s in slots:
-        dt = _parse_slot_date(s[3])
-        if dt and dt == tomorrow:
-            tomorrow_slots.append(s)
+    # 搜尋所有排班表，收集明天的 slot
+    tomorrow_slots = []  # [(slot, signups, list_title)]
+    for sch in schedules:
+        list_id = sch[0]
+        slots   = get_slots(list_id)
+        signups = get_slot_signups(list_id)
+        for s in slots:
+            dt = _parse_slot_date(s[3])
+            if dt and dt == tomorrow:
+                tomorrow_slots.append((s, signups, sch[2]))
 
     if not tomorrow_slots:
         return f"明天（{tomorrow.strftime('%m/%d')}）沒有排班項目。"
 
     lines = [
         f"📅 明日工作提醒（{tomorrow.strftime('%m/%d')}）",
-        f"📋 {active[2]}",
         "─" * 16,
     ]
-    for s in tomorrow_slots:
+    for s, signups, title in tomorrow_slots:
         sn       = s[2]
         required = s[8]
         names    = signups.get(sn, [])
@@ -692,10 +704,10 @@ def cmd_tomorrow_preview(group_id):
 
 
 def cmd_weekly_preview(group_id):
-    """手動觸發：下週工作預告"""
-    active = get_active_list(group_id)
-    if not active or _list_type(active) != "schedule":
-        return "目前沒有進行中的排班接龍。"
+    """手動觸發：下週工作預告（搜尋所有排班表）"""
+    schedules = get_all_schedules(group_id)
+    if not schedules:
+        return "目前沒有排班接龍。"
 
     now = datetime.now(TZ_TAIPEI).date()
     days_until_monday = (7 - now.weekday()) % 7
@@ -704,27 +716,25 @@ def cmd_weekly_preview(group_id):
     next_monday = now + timedelta(days=days_until_monday)
     next_sunday = next_monday + timedelta(days=6)
 
-    list_id = active[0]
-    slots   = get_slots(list_id)
-    signups = get_slot_signups(list_id)
-
-    logger.info(f"[weekly] list_id={list_id}, total_slots={len(slots)}, range={next_monday}~{next_sunday}")
-    next_week_slots = []
-    for s in slots:
-        dt = _parse_slot_date(s[3])
-        logger.info(f"[weekly] slot_num={s[2]}, date_str={s[3]!r}, parsed={dt}, in_range={dt and next_monday <= dt <= next_sunday}")
-        if dt and next_monday <= dt <= next_sunday:
-            next_week_slots.append(s)
+    # 搜尋所有排班表，收集下週的 slot
+    next_week_slots = []  # [(slot, signups, list_title)]
+    for sch in schedules:
+        list_id = sch[0]
+        slots   = get_slots(list_id)
+        signups = get_slot_signups(list_id)
+        for s in slots:
+            dt = _parse_slot_date(s[3])
+            if dt and next_monday <= dt <= next_sunday:
+                next_week_slots.append((s, signups, sch[2]))
 
     if not next_week_slots:
         return f"下週（{next_monday.strftime('%m/%d')}–{next_sunday.strftime('%m/%d')}）沒有排班項目。"
 
     lines = [
         f"📅 下週工作預告（{next_monday.strftime('%m/%d')}–{next_sunday.strftime('%m/%d')}）",
-        f"📋 {active[2]}",
         "─" * 16,
     ]
-    for s in next_week_slots:
+    for s, signups, title in next_week_slots:
         sn       = s[2]
         required = s[8]
         names    = signups.get(sn, [])
