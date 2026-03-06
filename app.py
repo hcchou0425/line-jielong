@@ -700,7 +700,7 @@ def cmd_weekly_preview(group_id):
     now = datetime.now(TZ_TAIPEI).date()
     days_until_monday = (7 - now.weekday()) % 7
     if days_until_monday == 0:
-        days_until_monday = 1
+        days_until_monday = 7
     next_monday = now + timedelta(days=days_until_monday)
     next_sunday = next_monday + timedelta(days=6)
 
@@ -708,9 +708,11 @@ def cmd_weekly_preview(group_id):
     slots   = get_slots(list_id)
     signups = get_slot_signups(list_id)
 
+    logger.info(f"[weekly] list_id={list_id}, total_slots={len(slots)}, range={next_monday}~{next_sunday}")
     next_week_slots = []
     for s in slots:
         dt = _parse_slot_date(s[3])
+        logger.info(f"[weekly] slot_num={s[2]}, date_str={s[3]!r}, parsed={dt}, in_range={dt and next_monday <= dt <= next_sunday}")
         if dt and next_monday <= dt <= next_sunday:
             next_week_slots.append(s)
 
