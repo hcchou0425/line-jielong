@@ -19,6 +19,11 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, JoinEvent
 import pytz
 
+try:
+    from anthropic import Anthropic
+except ImportError:
+    Anthropic = None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -32,6 +37,9 @@ DB_PATH = os.environ.get("DB_PATH", "/data/jielong.db")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+claude_client = Anthropic(api_key=ANTHROPIC_API_KEY) if (Anthropic and ANTHROPIC_API_KEY) else None
 
 # ── 排班表解析用正規表示式
 DATE_RE      = re.compile(r'(\d{1,2}/\d{1,2})\s*[（(]([一二三四五六日ㄧ零][一二三四五六日ㄧ零]?)[）)]')
@@ -1623,6 +1631,141 @@ def webhook():
     return "OK"
 
 
+# ══════════════════════════════════════════
+# NLU 自然語言報名（Claude AI）
+# ══════════════════════════════════════════
+
+def _build_nlu_prompt(slots, signups, user_name, text):
+    """組裝 NLU prompt，提供排班表資訊讓 Claude 判斷意圖"""
+    slot_lines = []
+    for s in slots:
+        # s: id, list_id, slot_num, date_str, day_str, activity, time_str, session, required_count, note
+        sn = s[2]
+        label = _slot_label(s)
+        signed = signups.get(sn, [])
+        slot_lines.append(f"  編號{sn}: {label}（需{s[8]}人，已報{len(signed)}人）")
+    slots_text = "\n".join(slot_lines)
+
+    return f"""目前進行中的接龍排班表：
+{slots_text}
+
+用戶「{user_name}」發了這則訊息：「{text}」
+
+請判斷用戶的意圖，回覆嚴格的 JSON 格式（不要加其他文字）：
+
+情況1 - 用戶想報名（可能用日期、工作名稱、編號、或自然語言描述）：
+{{"action": "join", "slot_nums": [編號1, 編號2, ...], "names": ["報名人名字1", ...] }}
+- slot_nums: 對應的工作編號陣列（支援多個）
+- names: 報名人名字陣列。如果用戶沒指定名字，填 ["{user_name}"]
+- 如果用戶說「3/10」且該日期只有一個工作，直接報名
+- 如果用戶說「3/10 值班」，找該日期的值班工作
+- 如果用戶說「3/10 3/12 3/14」，找出所有對應的工作編號
+- 如果用戶說「下周二」「明天」等相對日期，根據今天是 {datetime.now(TZ_TAIPEI).strftime('%Y/%m/%d')}（{['一','二','三','四','五','六','日'][datetime.now(TZ_TAIPEI).weekday()]}）來推算
+
+情況2 - 用戶想退出報名：
+{{"action": "leave", "slot_nums": [編號1, ...], "names": ["退出人名字1", ...] }}
+
+情況3 - 意圖跟接龍有關但不明確（例如該日期有多個工作且未指定）：
+{{"action": "clarify", "message": "你的釐清問題（繁體中文，簡短友善，列出選項）"}}
+
+情況4 - 跟接龍無關的閒聊或無法辨識：
+{{"action": "ignore"}}
+
+注意：
+- 只回覆 JSON，不要加任何其他文字
+- 日期比對時 3/10 和 03/10 視為相同
+- 模糊匹配工作名稱（如「值」→「值班」）
+- 如果同一日期有多個工作且用戶未指定，用 clarify 列出選項"""
+
+
+def _is_possibly_jielong_related(text, slots):
+    """預先過濾：訊息是否可能跟接龍報名有關"""
+    # 包含日期格式
+    if re.search(r'\d{1,2}/\d{1,2}', text):
+        return True
+    # 包含排班表中的工作名稱關鍵字
+    for s in slots:
+        activity = s[5] or ""
+        for keyword in activity.split():
+            if len(keyword) >= 2 and keyword in text:
+                return True
+    # 包含報名相關的詞彙
+    jielong_keywords = ['報名', '報', '參加', '認領', '我要', '幫我', '值班',
+                        '明天', '後天', '下周', '下週', '周一', '周二', '周三',
+                        '周四', '周五', '周六', '周日', '星期']
+    return any(kw in text for kw in jielong_keywords)
+
+
+def cmd_nlu_join(group_id, user_id, user_name, text):
+    """用 Claude 理解自然語言報名意圖"""
+    if not claude_client:
+        return None
+
+    active = get_active_list(group_id)
+    if not active or _list_type(active) != "schedule":
+        return None
+
+    list_id = active[0]
+    slots = get_slots(list_id)
+    if not slots:
+        return None
+
+    # 預先過濾，避免無關訊息浪費 API
+    if not _is_possibly_jielong_related(text, slots):
+        return None
+
+    signups = get_slot_signups(list_id)
+
+    prompt = _build_nlu_prompt(slots, signups, user_name, text)
+    try:
+        message = claude_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            system="你是接龍排班助理的語意分析模組。只回覆 JSON，不要加其他文字。",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        result_text = message.content[0].text.strip()
+        if result_text.startswith("```"):
+            result_text = result_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        result = json.loads(result_text)
+    except Exception as e:
+        logger.error(f"[nlu] Claude 呼叫或解析失敗: {e}")
+        return None
+
+    action = result.get("action")
+
+    if action == "ignore":
+        return None
+
+    if action == "clarify":
+        return f"🤔 {result.get('message', '請再說明一下您想報名的項目。')}"
+
+    if action == "join":
+        slot_nums = result.get("slot_nums", [])
+        names = result.get("names", [user_name])
+        if not slot_nums:
+            return None
+        # 轉換為 +N 格式，交給 cmd_join_multi 處理
+        converted = ' '.join(f'+{n}' for n in slot_nums)
+        converted += ' ' + ' '.join(names)
+        join_result = cmd_join_multi(group_id, user_id, user_name, converted)
+        return f"🤖 AI 理解：{join_result}" if join_result else None
+
+    if action == "leave":
+        slot_nums = result.get("slot_nums", [])
+        names = result.get("names", [user_name])
+        if not slot_nums:
+            return None
+        results = []
+        for name in names:
+            for sn in slot_nums:
+                leave_result = cmd_leave(group_id, user_id, name, f"退出 {sn} {name}")
+                results.append(leave_result)
+        return f"🤖 AI 理解：\n" + "\n".join(results)
+
+    return None
+
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     text = normalize(event.message.text.strip())
@@ -1651,6 +1794,16 @@ def handle_message(event):
     # ── 加入（+N 或 +N 姓名）
     elif re.match(r"\+\d+(\s|$)", text):
         reply = cmd_join(gid, uid, lazy_name(), text)
+
+    # ── 多項報名（1. 3. 5. 或 1. 3. 5. 姓名 格式）
+    elif len(re.findall(r'\d+[\.．]', text)) > 1:
+        # 將 "1. 3. 5. 小明" 轉換為 "+1 +3 +5 小明"
+        dot_nums = re.findall(r'(\d+)[\.．]', text)
+        name_part = re.sub(r'\d+[\.．]\s*', '', text).strip()
+        converted = ' '.join(f'+{n}' for n in dot_nums)
+        if name_part:
+            converted += f' {name_part}'
+        reply = cmd_join_multi(gid, uid, lazy_name(), converted)
 
     # ── 加入（N. 姓名 格式，與列表顯示一致）
     elif re.match(r"^\d+[\.．]\s*\S", text):
@@ -1752,6 +1905,16 @@ def handle_message(event):
             reply = HELP_TEXT
         else:
             reply = "此指令僅限負責人使用。"
+
+    # ── NLU fallback：無法匹配任何指令時，嘗試用 AI 理解
+    if reply is None and claude_client and len(text) >= 2 and len(text) <= 200:
+        if not re.match(r'^[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF\s]+$', text):
+            try:
+                reply = cmd_nlu_join(gid, uid, lazy_name(), text)
+                if reply:
+                    logger.info(f"[nlu] AI 處理成功")
+            except Exception as e:
+                logger.error(f"[nlu] 錯誤: {e}")
 
     logger.info(f"[msg] reply={'（無）' if reply is None else repr(reply[:40])}")
 
