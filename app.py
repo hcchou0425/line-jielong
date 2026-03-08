@@ -47,6 +47,7 @@ COUNT_RE     = re.compile(r'(\d+)\s*人')
 TIME_RE      = re.compile(r'\d{1,2}:\d{2}(?:\s*[-–]\s*\d{1,2}:\d{2})?')
 SESSION_RE   = re.compile(r'^\s*(上午|下午)\s*[：:](.*)')
 PREFILL_RE   = re.compile(r'^\s*\d+[.．、]\s*(.+\S)')  # 「1. 小白」式預填
+INLINE_PREFILL_RE = re.compile(r'\d+[.．]\s*(\S+)')   # 「1.美芬 2.美玲 3.碧雲」同行多人
 
 HELP_TEXT = """📖 接龍指令說明
 ━━━━━━━━━━━━━━
@@ -409,13 +410,18 @@ def parse_schedule_slots(text):
             elif TIME_RE.search(nl) and not time_str:
                 time_str = nl.strip()
             else:
-                pm = PREFILL_RE.match(nl)
-                if pm:
-                    name = pm.group(1).strip()
-                    if name:
-                        prefill_names.append(name)
+                # 同行多人格式：1.美芬 2.美玲 3.碧雲 4.淑惠
+                inline_matches = INLINE_PREFILL_RE.findall(nl)
+                if len(inline_matches) >= 2:
+                    prefill_names.extend(inline_matches)
                 else:
-                    note_parts.append(nl)
+                    pm = PREFILL_RE.match(nl)
+                    if pm:
+                        name = pm.group(1).strip()
+                        if name:
+                            prefill_names.append(name)
+                    else:
+                        note_parts.append(nl)
             j += 1
 
         note = " ".join(note_parts).strip()
@@ -503,7 +509,14 @@ def format_schedule_list(list_row, slots, signups, *, show_time=False):
         if required > 1:
             header += f"（{current}/{required}人）"
         lines.append(header)
-        lines.append("   👤 " + ("、".join(names) if names else "（尚無人報名）"))
+        if names:
+            # 編號人名，4人一行：1.美芬 2.美玲 3.碧雲 4.淑惠
+            numbered = [f"{i+1}.{n}" for i, n in enumerate(names)]
+            for row_start in range(0, len(numbered), 4):
+                row = numbered[row_start:row_start+4]
+                lines.append("   " + " ".join(row))
+        else:
+            lines.append("   （尚無人報名）")
 
     return "\n".join(lines)
 
@@ -785,18 +798,7 @@ def cmd_post_schedule(group_id, user_id, user_name, text):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    # 讀取舊的報名資料（用於重建時保留）
-    old_signups = {}  # {slot_num: [(user_id, user_name, registered_by), ...]}
-    carried_count = 0
-    if existing and _list_type(existing) == "schedule":
-        old_list_id = existing[0]
-        c.execute(
-            "SELECT slot_num, user_id, user_name, registered_by FROM entries WHERE list_id=? AND slot_num IS NOT NULL",
-            (old_list_id,),
-        )
-        for row in c.fetchall():
-            old_signups.setdefault(row[0], []).append((row[1], row[2], row[3]))
-
+    # 重貼排班表 = 全部覆蓋，不保留舊報名
     c.execute('UPDATE lists SET status="closed" WHERE group_id=? AND status="open"', (group_id,))
     c.execute(
         "INSERT INTO lists (group_id, title, creator_id, creator_name, list_type, last_broadcast_at, last_broadcast_count)"
@@ -825,33 +827,12 @@ def cmd_post_schedule(group_id, user_id, user_name, text):
                 (list_id, proxy_uid, name, sn, sn),
             )
 
-    # 保留舊報名（同編號的項目，且不是預填的重複姓名）
-    for sn, entries in old_signups.items():
-        if sn not in new_slot_nums:
-            continue
-        for uid, uname, reg_by in entries:
-            # 避免與新預填資料重複
-            c.execute(
-                "SELECT id FROM entries WHERE list_id=? AND user_name=? AND slot_num=?",
-                (list_id, uname, sn),
-            )
-            if c.fetchone():
-                continue
-            c.execute(
-                "INSERT INTO entries (list_id, user_id, user_name, slot_num, seq, registered_by)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (list_id, uid, uname, sn, sn, reg_by),
-            )
-            carried_count += 1
-
     conn.commit()
     conn.close()
 
-    is_rebuild = bool(old_signups)
+    is_rebuild = bool(existing)
     header = "🔄 排班表已重建！" if is_rebuild else "✅ 排班表已建立！"
     lines = [f"{header}\n📋 {title}\n共 {len(slots)} 個工作項目"]
-    if carried_count > 0:
-        lines.append(f"📌 已保留 {carried_count} 筆報名紀錄")
     lines.append("─────────────────")
     for s in slots:
         sn    = s["slot_num"]
