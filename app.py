@@ -1469,7 +1469,7 @@ def cmd_cancel(group_id, user_id, force=False):
 
 
 def cmd_restart(group_id, user_id, force=False):
-    """重新開團 — 負責人結束目前接龍，用相同排班表重新開團（清除所有報名）"""
+    """重新開團 — 保留所有報名資料，負責人可再用移除/清除修正錯誤"""
     active = get_active_list(group_id)
     if not active:
         return "目前沒有進行中的接龍。"
@@ -1481,23 +1481,34 @@ def cmd_restart(group_id, user_id, force=False):
     if _list_type(active) != "schedule":
         return "此功能僅適用於排班模式的接龍。"
 
-    old_list_id = active[0]
-    title       = active[2]
-    creator_id  = active[3]
+    old_list_id  = active[0]
+    title        = active[2]
+    creator_id   = active[3]
     creator_name = active[4]
 
-    # 讀取舊的 slots
+    # 讀取舊的 slots 和報名
     old_slots = get_slots(old_list_id)
     if not old_slots:
         return "找不到排班資料，無法重新開團。"
 
+    old_signups = get_slot_signups(old_list_id)
+
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+
+    # 讀取舊報名的完整資料（包含 user_id, registered_by）
+    c.execute(
+        "SELECT slot_num, user_id, user_name, registered_by FROM entries WHERE list_id=? AND slot_num IS NOT NULL",
+        (old_list_id,),
+    )
+    old_entries = {}  # {slot_num: [(user_id, user_name, registered_by), ...]}
+    for row in c.fetchall():
+        old_entries.setdefault(row[0], []).append((row[1], row[2], row[3]))
 
     # 關閉舊的
     c.execute('UPDATE lists SET status="closed" WHERE id=?', (old_list_id,))
 
-    # 建立新的（相同排班，不帶報名）
+    # 建立新的（相同排班）
     c.execute(
         "INSERT INTO lists (group_id, title, creator_id, creator_name, list_type, last_broadcast_at, last_broadcast_count)"
         " VALUES (?, ?, ?, ?, 'schedule', CURRENT_TIMESTAMP, 0)",
@@ -1505,6 +1516,7 @@ def cmd_restart(group_id, user_id, force=False):
     )
     new_list_id = c.lastrowid
 
+    # 複製 slots
     for s in old_slots:
         c.execute(
             "INSERT INTO slots (list_id,slot_num,date_str,day_str,activity,time_str,session,required_count,note)"
@@ -1512,17 +1524,33 @@ def cmd_restart(group_id, user_id, force=False):
             (new_list_id, s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9]),
         )
 
+    # 保留所有報名資料
+    carried_count = 0
+    for sn, entries in old_entries.items():
+        for uid, uname, reg_by in entries:
+            c.execute(
+                "INSERT INTO entries (list_id, user_id, user_name, slot_num, seq, registered_by)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (new_list_id, uid, uname, sn, sn, reg_by),
+            )
+            carried_count += 1
+
     conn.commit()
     conn.close()
 
-    lines = [f"🔄 已重新開團！\n📋 {title}\n共 {len(old_slots)} 個工作項目（報名已清除）", "─" * 16]
+    lines = [f"🔄 已重新開團！\n📋 {title}\n共 {len(old_slots)} 個工作項目，保留 {carried_count} 筆報名", "─" * 16]
     for s in old_slots:
         sn = s[2]
         label = f"【{sn}】{_slot_label(s)}"
-        if s[8] > 1:
-            label += f"（共{s[8]}人）"
+        names = old_signups.get(sn, [])
+        if names:
+            label += f"：{'、'.join(names)}"
+        else:
+            if s[8] > 1:
+                label += f"（共{s[8]}人）"
         lines.append(label)
     lines.append("─" * 16)
+    lines.append("💡 用「移除 編號 姓名」刪除錯誤報名，或「清除 編號」清空整個項目")
     return "\n".join(lines)
 
 
