@@ -1237,12 +1237,12 @@ def cmd_set_interval(text):
 ## cmd_set_reminder 已移除 — 空缺提醒功能已取消
 
 
-def cmd_clear_slot(group_id, user_id, text):
+def cmd_clear_slot(group_id, user_id, text, force=False):
     """清除 [編號] — 負責人清除某項目的所有報名"""
     active = get_active_list(group_id)
     if not active:
         return "目前沒有進行中的接龍。"
-    if active[3] != user_id:
+    if not force and active[3] != user_id:
         creator_name = active[4] or "負責人"
         return f"⚠️ 只有負責人（{creator_name}）才能清除項目。"
     if _list_type(active) != "schedule":
@@ -1404,16 +1404,17 @@ def cmd_list(group_id):
         return format_list(active, entries)
 
 
-def cmd_close(group_id, user_id):
+def cmd_close(group_id, user_id, force=False):
     active = get_active_list(group_id)
     if not active:
         return "目前沒有進行中的接龍。"
 
-    # 只有發起人才能結束接龍
-    creator_id = active[3]
-    if user_id != creator_id:
-        creator_name = active[4] or "發起人"
-        return f"⚠️ 只有發起人（{creator_name}）才能結束接龍。"
+    # 只有發起人才能結束接龍（force 模式跳過）
+    if not force:
+        creator_id = active[3]
+        if user_id != creator_id:
+            creator_name = active[4] or "發起人"
+            return f"⚠️ 只有發起人（{creator_name}）才能結束接龍。"
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -1421,50 +1422,28 @@ def cmd_close(group_id, user_id):
     conn.commit()
     conn.close()
 
+    prefix = "🔒 接龍已被強制結束！" if force else "🔒 工作認養已結束！"
     if _list_type(active) == "schedule":
         slots   = get_slots(active[0])
         signups = get_slot_signups(active[0])
         body    = format_schedule_list(active, slots, signups, show_time=True)
         total   = sum(len(v) for v in signups.values())
-        return f"🔒 工作認養已結束！\n\n{body}\n\n共 {total} 人報名"
+        return f"{prefix}\n\n{body}\n\n共 {total} 人報名"
     else:
+        if not force:
+            prefix = "🔒 接龍已結束，以下為最終名單："
         entries  = get_entries(active[0])
         body     = format_list(active, entries, show_time=True)
-        return f"🔒 接龍已結束，以下為最終名單：\n\n{body}\n\n共 {len(entries)} 人報名"
+        return f"{prefix}\n\n{body}\n\n共 {len(entries)} 人報名"
 
 
-def cmd_force_close(group_id, user_id):
-    """force close — 任何人皆可強制結束接龍"""
-    active = get_active_list(group_id)
-    if not active:
-        return "目前沒有進行中的接龍。"
-
-    user_name_display = active[4] or "發起人"
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('UPDATE lists SET status="closed" WHERE id=?', (active[0],))
-    conn.commit()
-    conn.close()
-
-    if _list_type(active) == "schedule":
-        slots   = get_slots(active[0])
-        signups = get_slot_signups(active[0])
-        body    = format_schedule_list(active, slots, signups, show_time=True)
-        total   = sum(len(v) for v in signups.values())
-        return f"🔒 接龍已被強制結束！\n\n{body}\n\n共 {total} 人報名"
-    else:
-        entries  = get_entries(active[0])
-        body     = format_list(active, entries, show_time=True)
-        return f"🔒 接龍已被強制結束！\n\n{body}\n\n共 {len(entries)} 人報名"
-
-
-def cmd_cancel(group_id, user_id):
+def cmd_cancel(group_id, user_id, force=False):
     """取消接龍 — 負責人刪除此接龍的所有資料"""
     active = get_active_list(group_id)
     if not active:
         return "目前沒有進行中的接龍。"
 
-    if active[3] != user_id:
+    if not force and active[3] != user_id:
         creator_name = active[4] or "負責人"
         return f"⚠️ 只有負責人（{creator_name}）才能取消接龍。"
 
@@ -1481,13 +1460,13 @@ def cmd_cancel(group_id, user_id):
     return f"🗑️ 接龍「{title}」已取消，所有資料已清除。"
 
 
-def cmd_restart(group_id, user_id):
+def cmd_restart(group_id, user_id, force=False):
     """重新開團 — 負責人結束目前接龍，用相同排班表重新開團（清除所有報名）"""
     active = get_active_list(group_id)
     if not active:
         return "目前沒有進行中的接龍。"
 
-    if active[3] != user_id:
+    if not force and active[3] != user_id:
         creator_name = active[4] or "負責人"
         return f"⚠️ 只有負責人（{creator_name}）才能重新開團。"
 
@@ -1702,9 +1681,23 @@ def handle_message(event):
             logger.error(f"[cmd_restart] 錯誤: {e}")
             reply = "⚠️ 重新開團失敗，請稍後再試。"
 
-    # ── 強制結束（任何人皆可）
-    elif text.lower() in ("force close", "force close"):
-        reply = cmd_force_close(gid, uid)
+    # ── force 指令（任何人皆可，跳過負責人檢查）
+    elif text.lower() == "force close":
+        reply = cmd_close(gid, uid, force=True)
+
+    elif text.lower() in ("force cancel", "force 取消接龍"):
+        reply = cmd_cancel(gid, uid, force=True)
+
+    elif text.lower() in ("force restart", "force 重新開團", "force 重開"):
+        try:
+            reply = cmd_restart(gid, uid, force=True)
+        except Exception as e:
+            logger.error(f"[cmd_restart] 錯誤: {e}")
+            reply = "⚠️ 重新開團失敗，請稍後再試。"
+
+    elif re.match(r"(?i)force\s+清除\s+\d+$", text):
+        force_text = re.sub(r"(?i)^force\s+", "", text)
+        reply = cmd_clear_slot(gid, uid, force_text, force=True)
 
     # ── 結束
     elif text in ("結束接龍", "結團", "/結束接龍", "/結團", "關閉接龍"):
