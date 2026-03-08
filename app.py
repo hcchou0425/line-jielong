@@ -1354,9 +1354,7 @@ def cmd_vacancy(group_id):
         sn       = s[2]
         required = s[8]
         current  = len(signups.get(sn, []))
-        if _is_strict_slot(s) and current < required:
-            unfilled.append((s, current, required))
-        elif not _is_strict_slot(s) and current == 0:
+        if current < required:
             unfilled.append((s, current, required))
 
     if not unfilled:
