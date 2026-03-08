@@ -763,8 +763,10 @@ def cmd_post_schedule(group_id, user_id, user_name, text):
     # 檢查是否有進行中的接龍
     existing = get_active_list(group_id)
     if existing and existing[3] != user_id:
-        creator_name = existing[4] or "負責人"
-        return f"⚠️ 目前已有進行中的接龍「{existing[2]}」\n只有負責人（{creator_name}）可以重建排班表。"
+        # 若所有工作已認領完畢，允許其他人開新接龍
+        if not _is_all_filled(existing):
+            creator_name = existing[4] or "負責人"
+            return f"⚠️ 目前已有進行中的接龍「{existing[2]}」\n只有負責人（{creator_name}）可以重建排班表。"
 
     slots, prefilled = parse_schedule_slots(text)
     if not slots:
@@ -1431,6 +1433,31 @@ def cmd_close(group_id, user_id):
         return f"🔒 接龍已結束，以下為最終名單：\n\n{body}\n\n共 {len(entries)} 人報名"
 
 
+def cmd_force_close(group_id, user_id):
+    """force close — 任何人皆可強制結束接龍"""
+    active = get_active_list(group_id)
+    if not active:
+        return "目前沒有進行中的接龍。"
+
+    user_name_display = active[4] or "發起人"
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('UPDATE lists SET status="closed" WHERE id=?', (active[0],))
+    conn.commit()
+    conn.close()
+
+    if _list_type(active) == "schedule":
+        slots   = get_slots(active[0])
+        signups = get_slot_signups(active[0])
+        body    = format_schedule_list(active, slots, signups, show_time=True)
+        total   = sum(len(v) for v in signups.values())
+        return f"🔒 接龍已被強制結束！\n\n{body}\n\n共 {total} 人報名"
+    else:
+        entries  = get_entries(active[0])
+        body     = format_list(active, entries, show_time=True)
+        return f"🔒 接龍已被強制結束！\n\n{body}\n\n共 {len(entries)} 人報名"
+
+
 def cmd_cancel(group_id, user_id):
     """取消接龍 — 負責人刪除此接龍的所有資料"""
     active = get_active_list(group_id)
@@ -1674,6 +1701,10 @@ def handle_message(event):
         except Exception as e:
             logger.error(f"[cmd_restart] 錯誤: {e}")
             reply = "⚠️ 重新開團失敗，請稍後再試。"
+
+    # ── 強制結束（任何人皆可）
+    elif text.lower() in ("force close", "force close"):
+        reply = cmd_force_close(gid, uid)
 
     # ── 結束
     elif text in ("結束接龍", "結團", "/結束接龍", "/結團", "關閉接龍"):
