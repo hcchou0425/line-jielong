@@ -45,9 +45,12 @@ claude_client = Anthropic(api_key=ANTHROPIC_API_KEY) if (Anthropic and ANTHROPIC
 DATE_RE      = re.compile(r'(\d{1,2}/\d{1,2})\s*[（(]([一二三四五六日ㄧ零][一二三四五六日ㄧ零]?)[）)]')
 COUNT_RE     = re.compile(r'(\d+)\s*人')
 TIME_RE      = re.compile(r'\d{1,2}:\d{2}(?:\s*[-–]\s*\d{1,2}:\d{2})?')
-SESSION_RE   = re.compile(r'^\s*(上午|下午)\s*[：:](.*)')
-PREFILL_RE   = re.compile(r'^\s*\d+[.．、]\s*(.+\S)')  # 「1. 小白」式預填
+SESSION_RE        = re.compile(r'^\s*(上午|下午)\s*[：:](.*)')
+PREFILL_RE        = re.compile(r'^\s*\d+[.．、]\s*(.+\S)')  # 「1. 小白」式預填
 INLINE_PREFILL_RE = re.compile(r'\d+[.．]\s*(\S+)')   # 「1.美芬 2.美玲 3.碧雲」同行多人
+GROUP_SESSION_RE  = re.compile(r'^\s*(\S+?)\s+(上午|下午)\s*[：:](.+)')  # 「林華 上午：淑瓊」
+GROUP_LINE_RE     = re.compile(r'^\s*([^\d\s：:、，,]+?)[：:]\s*(.+)$')  # 「德中：欣萍、琇環」
+_SESSIONS = {'上午', '下午'}
 
 HELP_TEXT = """📖 接龍指令說明
 ━━━━━━━━━━━━━━
@@ -165,6 +168,7 @@ def init_db():
         "ALTER TABLE lists   ADD COLUMN last_broadcast_count INTEGER   DEFAULT 0",
         "ALTER TABLE entries ADD COLUMN slot_num             INTEGER",
         "ALTER TABLE entries ADD COLUMN registered_by        TEXT",
+        "ALTER TABLE entries ADD COLUMN group_name           TEXT",
     ]:
         try:
             c.execute(sql)
@@ -234,6 +238,24 @@ def get_slot_signups(list_id):
     result = {}
     for snum, uname in rows:
         result.setdefault(snum, []).append(uname or "（未知）")
+    return result
+
+def get_slot_signups_with_group(list_id):
+    """回傳 {slot_num: {group_name_or_empty: [name, ...]}}，供工作提醒分群顯示"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "SELECT slot_num, group_name, user_name FROM entries"
+        " WHERE list_id=? AND slot_num IS NOT NULL ORDER BY id",
+        (list_id,),
+    )
+    rows = c.fetchall()
+    conn.close()
+    result = {}
+    for snum, gname, uname in rows:
+        d = result.setdefault(snum, {})
+        g = gname or ""
+        d.setdefault(g, []).append(uname or "（未知）")
     return result
 
 def get_all_active_lists():
@@ -383,11 +405,13 @@ def parse_schedule_slots(text):
             time_str = time_match.group().strip()
             after = (after[:time_match.start()] + after[time_match.end():]).strip()
 
-        activity      = after.strip()
-        sessions      = []   # 收集到的 session 名稱 ['上午','下午']
-        session_names = {}   # {'上午': '小珍', '下午': '小明'}
-        note_parts    = []
-        prefill_names = []   # 編號列表預填：['小白']
+        activity           = after.strip()
+        sessions           = []   # 收集到的 session 名稱 ['上午','下午']
+        session_names      = {}   # {'上午': '小珍', '下午': '小明'}
+        session_groups     = {}   # {'上午': '林華', '下午': '林華'}
+        note_parts         = []
+        prefill_names      = []   # 編號列表預填：['小白']（無群組）
+        group_prefill_names = []  # 群組預填：[('德中', '欣萍'), ('林華', '濰嬣'), ...]
 
         # 掃描後續行，直到空行或下一個日期
         j = i + 1
@@ -399,29 +423,50 @@ def parse_schedule_slots(text):
             if DATE_RE.search(nl):
                 break
 
-            sm = SESSION_RE.match(nl)
-            if sm:
-                sess      = sm.group(1)
-                name_part = sm.group(2).strip().lstrip(':：').strip()
+            # 優先嘗試「群組 上午：姓名」格式（如「林華 上午：淑瓊」）
+            gsm = GROUP_SESSION_RE.match(nl)
+            if gsm:
+                grp       = gsm.group(1)
+                sess      = gsm.group(2)
+                name_part = gsm.group(3).strip().lstrip(':：').strip()
                 if sess not in sessions:
                     sessions.append(sess)
+                session_groups[sess] = grp
                 if name_part:
                     session_names[sess] = name_part
-            elif TIME_RE.search(nl) and not time_str:
-                time_str = nl.strip()
             else:
-                # 同行多人格式：1.美芬 2.美玲 3.碧雲 4.淑惠
-                inline_matches = INLINE_PREFILL_RE.findall(nl)
-                if len(inline_matches) >= 2:
-                    prefill_names.extend(inline_matches)
+                sm = SESSION_RE.match(nl)
+                if sm:
+                    sess      = sm.group(1)
+                    name_part = sm.group(2).strip().lstrip(':：').strip()
+                    if sess not in sessions:
+                        sessions.append(sess)
+                    if name_part:
+                        session_names[sess] = name_part
+                elif TIME_RE.search(nl) and not time_str:
+                    time_str = nl.strip()
                 else:
-                    pm = PREFILL_RE.match(nl)
-                    if pm:
-                        name = pm.group(1).strip()
-                        if name:
-                            prefill_names.append(name)
+                    # 嘗試「群組名：姓名、姓名」格式（如「德中：欣萍、琇環、梅淑」）
+                    glm = GROUP_LINE_RE.match(nl)
+                    if glm and glm.group(1) not in _SESSIONS:
+                        grp       = glm.group(1)
+                        names_str = glm.group(2)
+                        names     = [n.strip() for n in re.split(r'[、，,]', names_str) if n.strip()]
+                        for name in names:
+                            group_prefill_names.append((grp, name))
                     else:
-                        note_parts.append(nl)
+                        # 同行多人格式：1.美芬 2.美玲 3.碧雲 4.淑惠
+                        inline_matches = INLINE_PREFILL_RE.findall(nl)
+                        if len(inline_matches) >= 2:
+                            prefill_names.extend(inline_matches)
+                        else:
+                            pm = PREFILL_RE.match(nl)
+                            if pm:
+                                name = pm.group(1).strip()
+                                if name:
+                                    prefill_names.append(name)
+                            else:
+                                note_parts.append(nl)
             j += 1
 
         note = " ".join(note_parts).strip()
@@ -443,7 +488,8 @@ def parse_schedule_slots(text):
                     "note":           note,
                 })
                 if sess in session_names:
-                    prefilled[sn] = [session_names[sess]]
+                    grp = session_groups.get(sess)  # 可能為 None
+                    prefilled[sn] = [(grp, session_names[sess])]
                 slot_num += 1
         else:
             sn = slot_num
@@ -457,8 +503,10 @@ def parse_schedule_slots(text):
                 "required_count": required,
                 "note":           note,
             })
-            if prefill_names:
-                prefilled[sn] = prefill_names
+            # 合併兩種預填：編號列表（群組=None）+ 群組格式
+            all_prefill = [(None, n) for n in prefill_names] + group_prefill_names
+            if all_prefill:
+                prefilled[sn] = all_prefill
             slot_num += 1
 
         i = j
@@ -687,11 +735,11 @@ def cmd_tomorrow_preview(group_id):
     tomorrow = datetime.now(TZ_TAIPEI).date() + timedelta(days=1)
 
     # 搜尋所有排班表，收集明天的 slot
-    tomorrow_slots = []  # [(slot, signups, list_title)]
+    tomorrow_slots = []  # [(slot, signups_grouped, list_title)]
     for sch in schedules:
         list_id = sch[0]
         slots   = get_slots(list_id)
-        signups = get_slot_signups(list_id)
+        signups = get_slot_signups_with_group(list_id)
         for s in slots:
             dt = _parse_slot_date(s[3])
             if dt and dt == tomorrow:
@@ -707,14 +755,18 @@ def cmd_tomorrow_preview(group_id):
     for s, signups, title in tomorrow_slots:
         sn       = s[2]
         required = s[8]
-        names    = signups.get(sn, [])
-        current  = len(names)
+        groups   = signups.get(sn, {})
+        current  = sum(len(v) for v in groups.values())
         label    = f"【{sn}】{_slot_label(s)}"
         if required > 1:
             label += f"（{current}/{required}人）"
 
-        if names:
-            label += f"\n   👤 {'、'.join(names)}"
+        if groups:
+            for grp, nms in groups.items():
+                if grp:
+                    label += f"\n   {grp}：{'、'.join(nms)}"
+                else:
+                    label += f"\n   👤 {'、'.join(nms)}"
         else:
             label += "\n   ⚠️ 尚無人報名"
 
@@ -738,11 +790,11 @@ def cmd_weekly_preview(group_id):
     next_sunday = next_monday + timedelta(days=6)
 
     # 搜尋所有排班表，收集下週的 slot
-    next_week_slots = []  # [(slot, signups, list_title)]
+    next_week_slots = []  # [(slot, signups_grouped, list_title)]
     for sch in schedules:
         list_id = sch[0]
         slots   = get_slots(list_id)
-        signups = get_slot_signups(list_id)
+        signups = get_slot_signups_with_group(list_id)
         for s in slots:
             dt = _parse_slot_date(s[3])
             if dt and next_monday <= dt <= next_sunday:
@@ -758,14 +810,18 @@ def cmd_weekly_preview(group_id):
     for s, signups, title in next_week_slots:
         sn       = s[2]
         required = s[8]
-        names    = signups.get(sn, [])
-        current  = len(names)
+        groups   = signups.get(sn, {})
+        current  = sum(len(v) for v in groups.values())
         label    = f"【{sn}】{_slot_label(s)}"
         if required > 1:
             label += f"（{current}/{required}人）"
 
-        if names:
-            label += f"\n   👤 {'、'.join(names)}"
+        if groups:
+            for grp, nms in groups.items():
+                if grp:
+                    label += f"\n   {grp}：{'、'.join(nms)}"
+                else:
+                    label += f"\n   👤 {'、'.join(nms)}"
         else:
             label += "\n   ⚠️ 尚無人報名"
 
@@ -818,13 +874,13 @@ def cmd_post_schedule(group_id, user_id, user_name, text):
         )
 
     # 將排班表中已填寫的姓名預先寫入 entries
-    for sn, names in prefilled.items():
-        for name in names:
+    for sn, entries in prefilled.items():
+        for grp, name in entries:
             proxy_uid = f"__prefill__{sn}__{name}"
             c.execute(
-                "INSERT INTO entries (list_id, user_id, user_name, slot_num, seq, registered_by)"
-                " VALUES (?, ?, ?, ?, ?, '__prefilled__')",
-                (list_id, proxy_uid, name, sn, sn),
+                "INSERT INTO entries (list_id, user_id, user_name, slot_num, seq, registered_by, group_name)"
+                " VALUES (?, ?, ?, ?, ?, '__prefilled__', ?)",
+                (list_id, proxy_uid, name, sn, sn, grp),
             )
 
     conn.commit()
@@ -845,7 +901,16 @@ def cmd_post_schedule(group_id, user_id, user_name, text):
             label += f" {s['required_count']}人"
         # 顯示預填姓名
         if sn in prefilled:
-            label += f"  ✓ {'、'.join(prefilled[sn])}"
+            grouped = {}
+            for grp, nm in prefilled[sn]:
+                grouped.setdefault(grp or "", []).append(nm)
+            parts = []
+            for grp, nms in grouped.items():
+                if grp:
+                    parts.append(f"{grp}：{'、'.join(nms)}")
+                else:
+                    parts.append("、".join(nms))
+            label += f"  ✓ {'  '.join(parts)}"
         lines.append(label)
     lines.append("")
     return "\n".join(lines)
