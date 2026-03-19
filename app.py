@@ -48,8 +48,10 @@ TIME_RE      = re.compile(r'\d{1,2}:\d{2}(?:\s*[-–]\s*\d{1,2}:\d{2})?')
 SESSION_RE        = re.compile(r'^\s*(上午|下午)\s*[：:](.*)')
 PREFILL_RE        = re.compile(r'^\s*\d+[.．、]\s*(.+\S)')  # 「1. 小白」式預填
 INLINE_PREFILL_RE = re.compile(r'\d+[.．]\s*(\S+)')   # 「1.美芬 2.美玲 3.碧雲」同行多人
-GROUP_SESSION_RE  = re.compile(r'^\s*(\S+?)\s+(上午|下午)\s*[：:](.+)')  # 「林華 上午：淑瓊」
-GROUP_LINE_RE     = re.compile(r'^\s*([^\d\s：:、，,]+?)[：:]\s*(.+)$')  # 「德中：欣萍、琇環」
+GROUP_SESSION_RE   = re.compile(r'^\s*(\S+?)\s+(上午|下午)\s*[：:](.+)')  # 「林華 上午：淑瓊」
+GROUP_LINE_RE      = re.compile(r'^\s*([^\d\s：:、，,]+?)[：:]\s*(.+)$')  # 「德中：欣萍、琇環」
+SESSION_TIME_RE    = re.compile(r'^\s*(上午|下午)\s+[\d:–\-]+(?:\s*[-–]\s*[\d:]+)?\s*[：:](.+)')  # 「上午 8:00-12:30：碧月」
+BARE_NAME_RE       = re.compile(r'^\s*([\u4e00-\u9fff]{1,6})\s*$')  # 單行裸名「秀美」
 _SESSIONS = {'上午', '下午'}
 
 HELP_TEXT = """📖 接龍指令說明
@@ -435,8 +437,17 @@ def parse_schedule_slots(text):
                 if name_part:
                     session_names[sess] = name_part
             else:
-                sm = SESSION_RE.match(nl)
-                if sm:
+                # 「上午 8:00-12:30：碧月」— 時段含時間，優先於 SESSION_RE 和 TIME_RE
+                stm = SESSION_TIME_RE.match(nl)
+                if stm:
+                    sess      = stm.group(1)
+                    name_part = stm.group(2).strip()
+                    if sess not in sessions:
+                        sessions.append(sess)
+                    if name_part:
+                        session_names[sess] = name_part
+                elif SESSION_RE.match(nl):
+                    sm = SESSION_RE.match(nl)
                     sess      = sm.group(1)
                     name_part = sm.group(2).strip().lstrip(':：').strip()
                     if sess not in sessions:
@@ -466,7 +477,12 @@ def parse_schedule_slots(text):
                                 if name:
                                     prefill_names.append(name)
                             else:
-                                note_parts.append(nl)
+                                # 單行裸名（如「秀美」「麗鵑」）
+                                bnm = BARE_NAME_RE.match(nl)
+                                if bnm:
+                                    prefill_names.append(bnm.group(1))
+                                else:
+                                    note_parts.append(nl)
             j += 1
 
         note = " ".join(note_parts).strip()
