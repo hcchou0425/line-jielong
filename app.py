@@ -52,6 +52,7 @@ GROUP_SESSION_RE   = re.compile(r'^\s*(\S+?)\s+(上午|下午)\s*[：:](.+)')  #
 GROUP_LINE_RE      = re.compile(r'^\s*([^\d\s：:、，,]+?)[：:]\s*(.+)$')  # 「德中：欣萍、琇環」
 SESSION_TIME_RE    = re.compile(r'^\s*(上午|下午)\s+[\d:–\-]+(?:\s*[-–]\s*[\d:]+)?\s*[：:](.+)')  # 「上午 8:00-12:30：碧月」
 BARE_NAME_RE       = re.compile(r'^\s*([\u4e00-\u9fff]{1,6})\s*$')  # 單行裸名「秀美」
+MULTI_NAME_RE      = re.compile(r'^\s*([\u4e00-\u9fff]{1,6}(?:[、，,][\u4e00-\u9fff]{1,6})+)\s*$')  # 多人裸名「美芬、慧珍」
 _SESSIONS = {'上午', '下午'}
 
 HELP_TEXT = """📖 接龍指令說明
@@ -484,7 +485,14 @@ def parse_schedule_slots(text):
                                 if bnm:
                                     prefill_names.append(bnm.group(1))
                                 else:
-                                    note_parts.append(nl)
+                                    # 多人裸名（如「美芬、慧珍」「麗鵑、鳳琴、惠君」）
+                                    mnm = MULTI_NAME_RE.match(nl)
+                                    if mnm:
+                                        prefill_names.extend(
+                                            n.strip() for n in re.split(r'[、，,]', mnm.group(1)) if n.strip()
+                                        )
+                                    else:
+                                        note_parts.append(nl)
             j += 1
 
         note = " ".join(note_parts).strip()
