@@ -66,8 +66,10 @@ HELP_TEXT = """📖 接龍指令說明
 退出 編號　　　 取消報名
 列表　　　　　　查看報名狀況
 空缺　　　　　　查看缺人項目
+今日工作提醒　　今天的排班
 明日工作提醒　　明天的排班
 下周工作提醒　　下週的排班
+3/22 工作提醒　　指定日期的排班
 
 ━━━━━━━━━━━━━━
 【負責人專用】
@@ -742,33 +744,27 @@ def _parse_slot_date(date_str):
         return None
 
 
-def cmd_tomorrow_preview(group_id):
-    """手動觸發：明日工作提醒（搜尋所有排班表）"""
+def _preview_for_date(group_id, target_date, header):
+    """指定日期的工作提醒（共用邏輯）"""
     schedules = get_all_schedules(group_id)
     if not schedules:
         return "目前沒有排班接龍。"
 
-    tomorrow = datetime.now(TZ_TAIPEI).date() + timedelta(days=1)
-
-    # 搜尋所有排班表，收集明天的 slot
-    tomorrow_slots = []  # [(slot, signups_grouped, list_title)]
+    matched = []
     for sch in schedules:
         list_id = sch[0]
         slots   = get_slots(list_id)
         signups = get_slot_signups_with_group(list_id)
         for s in slots:
             dt = _parse_slot_date(s[3])
-            if dt and dt == tomorrow:
-                tomorrow_slots.append((s, signups, sch[2]))
+            if dt and dt == target_date:
+                matched.append((s, signups, sch[2]))
 
-    if not tomorrow_slots:
-        return f"明天（{tomorrow.strftime('%m/%d')}）沒有排班項目。"
+    if not matched:
+        return f"{target_date.strftime('%m/%d')} 沒有排班項目。"
 
-    lines = [
-        f"📅 明日工作提醒（{tomorrow.strftime('%m/%d')}）",
-        "─" * 16,
-    ]
-    for s, signups, title in tomorrow_slots:
+    lines = [header, "─" * 16]
+    for s, signups, title in matched:
         sn       = s[2]
         required = s[8]
         groups   = signups.get(sn, {})
@@ -792,6 +788,24 @@ def cmd_tomorrow_preview(group_id):
     return "\n".join(lines)
 
 
+def cmd_today_preview(group_id):
+    today = datetime.now(TZ_TAIPEI).date()
+    return _preview_for_date(group_id, today, f"📅 今日工作提醒（{today.strftime('%m/%d')}）")
+
+
+def cmd_tomorrow_preview(group_id):
+    tomorrow = datetime.now(TZ_TAIPEI).date() + timedelta(days=1)
+    return _preview_for_date(group_id, tomorrow, f"📅 明日工作提醒（{tomorrow.strftime('%m/%d')}）")
+
+
+def cmd_date_preview(group_id, date_str):
+    """指定日期工作提醒，date_str 如 '3/22'"""
+    target = _parse_slot_date(date_str)
+    if not target:
+        return f"日期格式錯誤：{date_str}"
+    return _preview_for_date(group_id, target, f"📅 {target.strftime('%m/%d')} 工作提醒")
+
+
 def cmd_weekly_preview(group_id):
     """手動觸發：下週工作預告（搜尋所有排班表）"""
     schedules = get_all_schedules(group_id)
@@ -805,8 +819,7 @@ def cmd_weekly_preview(group_id):
     next_monday = now + timedelta(days=days_until_monday)
     next_sunday = next_monday + timedelta(days=6)
 
-    # 搜尋所有排班表，收集下週的 slot
-    next_week_slots = []  # [(slot, signups_grouped, list_title)]
+    matched = []
     for sch in schedules:
         list_id = sch[0]
         slots   = get_slots(list_id)
@@ -814,16 +827,14 @@ def cmd_weekly_preview(group_id):
         for s in slots:
             dt = _parse_slot_date(s[3])
             if dt and next_monday <= dt <= next_sunday:
-                next_week_slots.append((s, signups, sch[2]))
+                matched.append((s, signups, sch[2]))
 
-    if not next_week_slots:
+    if not matched:
         return f"下週（{next_monday.strftime('%m/%d')}–{next_sunday.strftime('%m/%d')}）沒有排班項目。"
 
-    lines = [
-        f"📅 下週工作預告（{next_monday.strftime('%m/%d')}–{next_sunday.strftime('%m/%d')}）",
-        "─" * 16,
-    ]
-    for s, signups, title in next_week_slots:
+    header = f"📅 下週工作預告（{next_monday.strftime('%m/%d')}–{next_sunday.strftime('%m/%d')}）"
+    lines  = [header, "─" * 16]
+    for s, signups, title in matched:
         sn       = s[2]
         required = s[8]
         groups   = signups.get(sn, {})
@@ -1914,6 +1925,10 @@ def handle_message(event):
     elif text in ("空缺", "缺人", "未認領", "誰沒報"):
         reply = cmd_vacancy(gid)
 
+    # ── 今日工作提醒
+    elif text in ("今日工作提醒", "今天工作提醒", "今日工作", "今天工作"):
+        reply = cmd_today_preview(gid)
+
     # ── 明日工作提醒（手動觸發）
     elif text in ("明日工作提醒", "明天工作提醒", "明日工作", "明天工作"):
         reply = cmd_tomorrow_preview(gid)
@@ -1921,6 +1936,11 @@ def handle_message(event):
     # ── 下周工作提醒（手動觸發）
     elif text in ("下周工作提醒", "下週工作提醒", "下周工作", "下週工作"):
         reply = cmd_weekly_preview(gid)
+
+    # ── 指定日期工作提醒（如「3/22 工作提醒」）
+    elif re.match(r"^\d{1,2}/\d{1,2}\s*工作提醒$", text):
+        ds = re.match(r"^(\d{1,2}/\d{1,2})", text).group(1)
+        reply = cmd_date_preview(gid, ds)
 
     # ── 重新開團（負責人清除報名重來）
     elif text in ("重新開團", "重開", "/重新開團"):
