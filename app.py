@@ -771,7 +771,7 @@ def _preview_for_date(group_id, target_date, header):
     if not matched:
         return f"{target_date.strftime('%m/%d')} 沒有排班項目。"
 
-    lines = [header, "─" * 16]
+    lines = [header, "─" * 8]
     for s, signups, title in matched:
         sn       = s[2]
         required = s[8]
@@ -792,7 +792,7 @@ def _preview_for_date(group_id, target_date, header):
 
         lines.append(label)
 
-    lines.append("─" * 16)
+    lines.append("─" * 8)
     return "\n".join(lines)
 
 
