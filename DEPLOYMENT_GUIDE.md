@@ -276,7 +276,6 @@ https://rbot-line-bot-xxxx.onrender.com/webhook
 
 ### Upgrade to prevent sleeping
 - Upgrade to Render paid plan ($7/month)
-- Or use another platform like Railway (first $5/month free)
 
 ---
 

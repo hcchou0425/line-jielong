@@ -82,7 +82,6 @@ curl -X POST https://your-domain.com/webhook
 
 #### Common deployment platforms:
 - **Render** (https://render.com) - Free tier available
-- **Railway** (https://railway.app) - Free tier available
 - **Heroku** - Paid
 - **Fly.io** - Free tier available
 - **AWS/GCP** - Various pricing
@@ -144,7 +143,7 @@ Before adding bot to group again:
 
 ## 🚀 Next Steps
 
-1. **Deploy your bot** to a platform (Render/Railway recommended for free tier)
+1. **Deploy your bot** to a platform (Render recommended for free tier)
 2. **Set webhook URL** in LINE Developers Console
 3. **Verify webhook** (should show green checkmark)
 4. **Test in 1-on-1** chat first
@@ -163,7 +162,6 @@ Check the logs on your deployment platform for error messages.
 
 Common log locations:
 - **Render:** Dashboard > Logs tab
-- **Railway:** Project > Deployments > Logs
 - **Heroku:** `heroku logs --tail`
 
 ---
